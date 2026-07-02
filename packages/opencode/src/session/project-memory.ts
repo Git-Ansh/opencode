@@ -1,28 +1,42 @@
 import fs from "fs/promises"
 import path from "path"
-import { Instance } from "../project/instance"
-import { Log } from "../util/log"
+import { AppRuntime } from "@/effect/app-runtime"
+import { InstanceState } from "@/effect/instance-state"
+
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), which only wires up at the
+// process-wide Logger level, not as a per-module logger these plain async
+// functions can call into. Using a minimal local logger instead.
+const log = {
+  info: (message: string, extra?: Record<string, unknown>) => {
+    if (process.env["OPENCODE_LOG_LEVEL"] === "DEBUG") console.error(`[project-memory] ${message}`, extra ?? "")
+  },
+}
 
 export namespace ProjectMemory {
-  const log = Log.create({ service: "project-memory" })
-
-  function memoryDir(): string {
-    return path.join(Instance.directory, ".opencode", "memory")
+  async function directory(): Promise<string> {
+    return AppRuntime.runPromise(InstanceState.directory)
   }
 
-  async function ensureDir(): Promise<void> {
-    await fs.mkdir(memoryDir(), { recursive: true })
+  async function memoryDir(): Promise<string> {
+    return path.join(await directory(), ".opencode", "memory")
   }
 
-  function keyToFile(key: string): string {
+  async function ensureDir(): Promise<string> {
+    const dir = await memoryDir()
+    await fs.mkdir(dir, { recursive: true })
+    return dir
+  }
+
+  function keyToFile(dir: string, key: string): string {
     // Sanitize key to safe filename
     const safe = key.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80)
-    return path.join(memoryDir(), `${safe}.md`)
+    return path.join(dir, `${safe}.md`)
   }
 
   export async function save(key: string, content: string): Promise<void> {
-    await ensureDir()
-    const filePath = keyToFile(key)
+    const dir = await ensureDir()
+    const filePath = keyToFile(dir, key)
     const header = `# ${key}\n_Updated: ${new Date().toISOString()}_\n\n`
     await fs.writeFile(filePath, header + content, "utf-8")
     log.info("saved memory", { key })
@@ -30,7 +44,8 @@ export namespace ProjectMemory {
 
   export async function get(key: string): Promise<string | undefined> {
     try {
-      const content = await fs.readFile(keyToFile(key), "utf-8")
+      const dir = await memoryDir()
+      const content = await fs.readFile(keyToFile(dir, key), "utf-8")
       return content
     } catch {
       return undefined
@@ -39,21 +54,22 @@ export namespace ProjectMemory {
 
   export async function remove(key: string): Promise<void> {
     try {
-      await fs.unlink(keyToFile(key))
+      const dir = await memoryDir()
+      await fs.unlink(keyToFile(dir, key))
     } catch {
       // ignore if not exists
     }
   }
 
   export async function list(): Promise<{ key: string; summary: string }[]> {
-    await ensureDir()
-    const files = await fs.readdir(memoryDir()).catch(() => [])
+    const dir = await ensureDir()
+    const files = await fs.readdir(dir).catch(() => [])
     const result: { key: string; summary: string }[] = []
 
     for (const file of files) {
       if (!file.endsWith(".md")) continue
       try {
-        const content = await fs.readFile(path.join(memoryDir(), file), "utf-8")
+        const content = await fs.readFile(path.join(dir, file), "utf-8")
         const firstLine = content.split("\n").find((l) => l.startsWith("# "))
         const key = firstLine?.replace(/^#\s*/, "") ?? file.replace(".md", "")
         // Get first non-header, non-empty line as summary
@@ -69,8 +85,8 @@ export namespace ProjectMemory {
   }
 
   export async function search(query: string): Promise<{ key: string; content: string }[]> {
-    await ensureDir()
-    const files = await fs.readdir(memoryDir()).catch(() => [])
+    const dir = await ensureDir()
+    const files = await fs.readdir(dir).catch(() => [])
     const results: { key: string; content: string; score: number }[] = []
     const terms = query
       .toLowerCase()
@@ -82,7 +98,7 @@ export namespace ProjectMemory {
     for (const file of files) {
       if (!file.endsWith(".md")) continue
       try {
-        const content = await fs.readFile(path.join(memoryDir(), file), "utf-8")
+        const content = await fs.readFile(path.join(dir, file), "utf-8")
         const lower = content.toLowerCase()
         let score = 0
         for (const term of terms) {

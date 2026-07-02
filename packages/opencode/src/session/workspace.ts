@@ -1,8 +1,7 @@
-import { Log } from "../util/log"
-
+// Note(port): the original `util/log.ts` Log.create({service}) logger no longer
+// exists (logging moved to Effect's Logger under packages/core/src/observability),
+// and this module never actually logged anything, so the import is just dropped.
 export namespace Workspace {
-  const log = Log.create({ service: "workspace" })
-
   interface State {
     modified: string[]
     errors: string[]

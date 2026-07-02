@@ -1,14 +1,29 @@
 import { Agent } from "./agent"
-import { Session } from "../session"
+import { Session } from "../session/session"
 import { SessionPrompt } from "../session/prompt"
-import { Identifier } from "../id/id"
-import { Instance } from "../project/instance"
-import { Log } from "../util/log"
-import { MessageV2 } from "../session/message-v2"
+import { SessionID } from "../session/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { AppRuntime } from "@/effect/app-runtime"
 
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), not reachable from this plain
+// async orchestration engine. Falls back to console.error.
+const log = {
+  info: (message: string, extra?: Record<string, unknown>) => console.error(`[orchestrator] ${message}`, extra ?? ""),
+}
+
+// TODO(port): Agent.get/list, Session.create/messages, and SessionPrompt.prompt
+// are now Effect services (packages under the app's Effect DI graph) rather than
+// plain async functions. This file stays Promise-based — matching its original
+// design and the `tool/orchestrate.ts` caller — and bridges into the Effect
+// world via `AppRuntime.runPromise`, the same escape hatch the codebase itself
+// uses for other legacy Promise/async-local-storage callers (see
+// project/instance-runtime.ts). A more idiomatic native-Effect rewrite (see
+// tool/task.ts for the modern equivalent of a single delegated subagent call)
+// is possible but out of scope for this import-fixing pass.
 export namespace Orchestrator {
-  const log = Log.create({ service: "orchestrator" })
-
   export type Strategy = "parallel" | "pipeline" | "map-reduce" | "consensus"
 
   export interface TaskSpec {
@@ -46,7 +61,7 @@ export namespace Orchestrator {
 
   async function spawnAgent(spec: TaskSpec, parentID: string, model: { providerID: string; modelID: string }, abort: AbortSignal): Promise<Result> {
     const start = Date.now()
-    const agent = await Agent.get(spec.agent)
+    const agent = await AppRuntime.runPromise(Agent.Service.use((a) => a.get(spec.agent)))
     if (!agent) {
       return {
         agent: spec.agent,
@@ -69,26 +84,35 @@ export namespace Orchestrator {
         }
       }
 
-      const session = await Session.create({
-        parentID,
-        title: `${spec.description} (@${spec.agent} subagent)`,
-      })
+      const session = await AppRuntime.runPromise(
+        Session.use.create({
+          parentID: SessionID.make(parentID),
+          title: `${spec.description} (@${spec.agent} subagent)`,
+        }),
+      )
 
-      const result = await SessionPrompt.prompt({
-        sessionID: session.id,
-        agent: spec.agent,
-        model: finalModel,
-        parts: [{ type: "text", text: spec.prompt }],
-      })
+      await AppRuntime.runPromise(
+        SessionPrompt.Service.use((sessionPrompt) =>
+          sessionPrompt.prompt({
+            sessionID: session.id,
+            agent: spec.agent,
+            model: {
+              providerID: ProviderV2.ID.make(finalModel.providerID),
+              modelID: ModelV2.ID.make(finalModel.modelID),
+            },
+            parts: [{ type: "text", text: spec.prompt }],
+          }),
+        ),
+      )
 
-      const msgs = await Session.messages({ sessionID: session.id })
+      const msgs = await AppRuntime.runPromise(Session.use.messages({ sessionID: session.id }))
       const lastAssistant = msgs
         .filter((m) => m.info.role === "assistant")
         .pop()
 
       const output = lastAssistant?.parts
         .filter((p) => p.type === "text")
-        .map((p) => (p as MessageV2.TextPart).text)
+        .map((p) => (p as SessionV1.TextPart).text)
         .join("\n") ?? ""
 
       return {

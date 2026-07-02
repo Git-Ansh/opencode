@@ -1,14 +1,23 @@
 import { spawn } from "child_process"
-import { Bus } from "../bus"
+import { Effect, Stream } from "effect"
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionStatus } from "../session/status"
-import { PermissionNext } from "../permission/next"
-import { Session } from "../session"
+import { Permission } from "../permission"
+import { Session } from "../session/session"
 import { Config } from "../config/config"
-import { Log } from "../util/log"
+
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), not reachable from this plain
+// async module. Falls back to console.error.
+const log = {
+  warn: (message: string, extra?: Record<string, unknown>) => console.error(`[notification] ${message}`, extra ?? ""),
+  info: (message: string, extra?: Record<string, unknown>) => {
+    if (process.env["OPENCODE_LOG_LEVEL"] === "DEBUG") console.error(`[notification] ${message}`, extra ?? "")
+  },
+}
 
 export namespace Notification {
-  const log = Log.create({ service: "notification" })
-
   let initialized = false
 
   export async function send(title: string, body: string): Promise<void> {
@@ -59,33 +68,63 @@ $n.Dispose()
     if (initialized) return
     initialized = true
 
-    const config = await Config.get()
-    const notifConfig = config.notifications
+    const config = await AppRuntime.runPromise(Config.Service.use((c) => c.get()))
+    // TODO(port): config/config.ts does not define a `notifications` schema
+    // block yet (that's Phase 2's job — see PORT_PLAN.md). Read defensively
+    // until the real schema field exists.
+    const notifConfig = (
+      config as {
+        notifications?: {
+          enabled?: boolean
+          on_complete?: boolean
+          on_permission?: boolean
+          on_error?: boolean
+        }
+      }
+    ).notifications
     if (notifConfig?.enabled === false) return
+
+    const subscriptions: Effect.Effect<void, never, EventV2Bridge.Service>[] = []
 
     // Notify on task completion (session goes idle)
     if (notifConfig?.on_complete !== false) {
-      Bus.subscribe(SessionStatus.Event.Status, (evt) => {
-        if (evt.properties.status.type === "idle") {
-          send("OpenCode", "Task complete")
-        }
-      })
+      subscriptions.push(
+        Effect.gen(function* () {
+          const events = yield* EventV2Bridge.Service
+          yield* Stream.runForEach(events.subscribe(SessionStatus.Event.Idle), () =>
+            Effect.promise(() => send("OpenCode", "Task complete")),
+          )
+        }),
+      )
     }
 
     // Notify when permission is needed
     if (notifConfig?.on_permission !== false) {
-      Bus.subscribe(PermissionNext.Event.Asked, (evt) => {
-        send("OpenCode - Action Required", `Permission needed: ${evt.properties.permission}`)
-      })
+      subscriptions.push(
+        Effect.gen(function* () {
+          const events = yield* EventV2Bridge.Service
+          yield* Stream.runForEach(events.subscribe(Permission.Event.Asked), (evt) =>
+            Effect.promise(() => send("OpenCode - Action Required", `Permission needed: ${evt.data.permission}`)),
+          )
+        }),
+      )
     }
 
     // Notify on errors
     if (notifConfig?.on_error !== false) {
-      Bus.subscribe(Session.Event.Error, (evt) => {
-        const errName = evt.properties.error?.name ?? "Unknown error"
-        send("OpenCode - Error", `Session error: ${errName}`)
-      })
+      subscriptions.push(
+        Effect.gen(function* () {
+          const events = yield* EventV2Bridge.Service
+          yield* Stream.runForEach(events.subscribe(Session.Event.Error), (evt) => {
+            const errName = (evt.data as { error?: { name?: string } }).error?.name ?? "Unknown error"
+            return Effect.promise(() => send("OpenCode - Error", `Session error: ${errName}`))
+          })
+        }),
+      )
     }
+
+    // Fire-and-forget: keep these subscriptions alive for the process lifetime.
+    AppRuntime.runFork(Effect.all(subscriptions, { concurrency: "unbounded", discard: true }))
 
     log.info("notifications initialized")
   }

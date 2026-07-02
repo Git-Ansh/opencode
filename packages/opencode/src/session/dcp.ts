@@ -1,15 +1,21 @@
-import { Session } from "."
-import { MessageV2 } from "./message-v2"
+import { AppRuntime } from "@/effect/app-runtime"
+import { Session } from "./session"
+import { SessionID } from "./schema"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "../provider/provider"
 import { Token } from "../util/token"
-import { Log } from "../util/log"
 import { ProviderTransform } from "../provider/transform"
 
-export namespace DCP {
-  const log = Log.create({ service: "dcp" })
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), not reachable from this plain
+// async helper. Falls back to console.error.
+const log = {
+  info: (message: string, extra?: Record<string, unknown>) => console.error(`[dcp] ${message}`, extra ?? ""),
+}
 
+export namespace DCP {
   interface ScoreEntry {
-    part: MessageV2.Part
+    part: SessionV1.Part
     messageID: string
     messageIndex: number
     score: number
@@ -28,7 +34,7 @@ export namespace DCP {
     sessionID: string
     model: Provider.Model
   }): Promise<Stats> {
-    const msgs = await Session.messages({ sessionID: input.sessionID })
+    const msgs = await AppRuntime.runPromise(Session.use.messages({ sessionID: SessionID.make(input.sessionID) }))
     const contextLimit = input.model.limit.context
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const target = Math.floor((contextLimit - maxOutput) * 0.85)
@@ -82,7 +88,7 @@ export namespace DCP {
     for (const entry of toPrune) {
       if (entry.part.type === "tool" && entry.part.state.status === "completed") {
         entry.part.state.time.compacted = Date.now()
-        await Session.updatePart(entry.part)
+        await AppRuntime.runPromise(Session.use.updatePart(entry.part))
       }
     }
 
@@ -100,7 +106,7 @@ export namespace DCP {
     }
   }
 
-  function scorePart(part: MessageV2.Part, msgIndex: number, totalMsgs: number): number {
+  function scorePart(part: SessionV1.Part, msgIndex: number, totalMsgs: number): number {
     let score = 0
 
     // Recency score: newer = higher (exponential decay)
@@ -160,7 +166,7 @@ export namespace DCP {
     return false
   }
 
-  function estimatePartTokens(part: MessageV2.Part): number {
+  function estimatePartTokens(part: SessionV1.Part): number {
     switch (part.type) {
       case "text":
         return Token.estimate((part as any).text ?? "")

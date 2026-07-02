@@ -1,8 +1,15 @@
-import z from "zod"
-import { Tool } from "./tool"
-import { git } from "../util/git"
-import { Instance } from "../project/instance"
+import { Schema, Effect } from "effect"
+import * as Tool from "./tool"
+import { Git } from "@/git"
+import { InstanceState } from "@/effect/instance-state"
 import DESCRIPTION from "./git.txt"
+
+const Parameters = Schema.Struct({
+  action: Schema.Literals(["status", "diff", "log", "branch", "show", "stash_list"]),
+  args: Schema.optional(Schema.String).annotate({
+    description: "Additional arguments (e.g., commit hash for show, file path for diff)",
+  }),
+})
 
 function parseStatus(raw: string) {
   const lines = raw.trim().split(/\r?\n/).filter(Boolean)
@@ -143,108 +150,117 @@ function parseStash(raw: string) {
   })
 }
 
-export const GitTool = Tool.define("git", {
-  description: DESCRIPTION,
-  parameters: z.object({
-    action: z.enum(["status", "diff", "log", "branch", "show", "stash_list"]),
-    args: z.string().optional().describe("Additional arguments (e.g., commit hash for show, file path for diff)"),
-  }),
-  async execute(params, ctx) {
-    const cwd = Instance.worktree
-    const extra = params.args ? params.args.split(/\s+/) : []
+export const GitTool = Tool.define(
+  "git",
+  Effect.gen(function* () {
+    const git = yield* Git.Service
 
-    await ctx.ask({
-      permission: "git",
-      patterns: [params.action],
-      always: ["*"],
-      metadata: { action: params.action, args: params.args },
-    })
+    return {
+      description: DESCRIPTION,
+      parameters: Parameters,
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+        Effect.gen(function* () {
+          const cwd = (yield* InstanceState.context).worktree
+          const extra = params.args ? params.args.split(/\s+/) : []
 
-    switch (params.action) {
-      case "status": {
-        const result = await git(["status", "--porcelain=v1", "-b"], { cwd })
-        if (result.exitCode !== 0) throw new Error(`git status failed: ${result.stderr.toString()}`)
-        const parsed = parseStatus(result.text())
-        return {
-          title: "git status",
-          output: JSON.stringify(parsed, null, 2),
-          metadata: parsed,
-        }
-      }
+          yield* ctx.ask({
+            permission: "git",
+            patterns: [params.action],
+            always: ["*"],
+            metadata: { action: params.action, args: params.args },
+          })
 
-      case "diff": {
-        const args = ["diff", "--stat", ...extra]
-        const stat = await git(args, { cwd })
-        if (stat.exitCode !== 0) throw new Error(`git diff failed: ${stat.stderr.toString()}`)
-        const parsed = parseDiff(stat.text())
+          switch (params.action) {
+            case "status": {
+              const result = yield* git.run(["status", "--porcelain=v1", "-b"], { cwd })
+              if (result.exitCode !== 0) throw new Error(`git status failed: ${result.stderr.toString()}`)
+              const parsed = parseStatus(result.text())
+              return {
+                title: "git status",
+                output: JSON.stringify(parsed, null, 2),
+                metadata: parsed as Record<string, any>,
+              }
+            }
 
-        const full = await git(["diff", ...extra], { cwd })
-        const text = full.text()
+            case "diff": {
+              const args = ["diff", "--stat", ...extra]
+              const stat = yield* git.run(args, { cwd })
+              if (stat.exitCode !== 0) throw new Error(`git diff failed: ${stat.stderr.toString()}`)
+              const parsed = parseDiff(stat.text())
 
-        const output = {
-          ...parsed,
-          diff: text,
-        }
-        return {
-          title: "git diff",
-          output: JSON.stringify(output, null, 2),
-          metadata: { files: parsed.files.length, summary: parsed.summary },
-        }
-      }
+              const full = yield* git.run(["diff", ...extra], { cwd })
+              const text = full.text()
 
-      case "log": {
-        const args = extra.length ? ["log", "--oneline", "--decorate", ...extra] : ["log", "--oneline", "--decorate", "-n", "20"]
-        const result = await git(args, { cwd })
-        if (result.exitCode !== 0) throw new Error(`git log failed: ${result.stderr.toString()}`)
-        const parsed = parseLog(result.text())
-        return {
-          title: "git log",
-          output: JSON.stringify(parsed, null, 2),
-          metadata: { count: parsed.length },
-        }
-      }
+              const output = {
+                ...parsed,
+                diff: text,
+              }
+              return {
+                title: "git diff",
+                output: JSON.stringify(output, null, 2),
+                metadata: { files: parsed.files.length, summary: parsed.summary } as Record<string, any>,
+              }
+            }
 
-      case "branch": {
-        const result = await git(["branch", "-vv"], { cwd })
-        if (result.exitCode !== 0) throw new Error(`git branch failed: ${result.stderr.toString()}`)
-        const parsed = parseBranch(result.text())
-        return {
-          title: "git branch",
-          output: JSON.stringify(parsed, null, 2),
-          metadata: parsed,
-        }
-      }
+            case "log": {
+              const args = extra.length
+                ? ["log", "--oneline", "--decorate", ...extra]
+                : ["log", "--oneline", "--decorate", "-n", "20"]
+              const result = yield* git.run(args, { cwd })
+              if (result.exitCode !== 0) throw new Error(`git log failed: ${result.stderr.toString()}`)
+              const parsed = parseLog(result.text())
+              return {
+                title: "git log",
+                output: JSON.stringify(parsed, null, 2),
+                metadata: { count: parsed.length } as Record<string, any>,
+              }
+            }
 
-      case "show": {
-        if (extra.length === 0) throw new Error("show requires a commit hash argument")
-        const result = await git(["show", "--stat", ...extra], { cwd })
-        if (result.exitCode !== 0) throw new Error(`git show failed: ${result.stderr.toString()}`)
-        const parsed = parseShow(result.text())
-        return {
-          title: `git show ${extra[0]}`,
-          output: JSON.stringify(parsed, null, 2),
-          metadata: parsed,
-        }
-      }
+            case "branch": {
+              const result = yield* git.run(["branch", "-vv"], { cwd })
+              if (result.exitCode !== 0) throw new Error(`git branch failed: ${result.stderr.toString()}`)
+              const parsed = parseBranch(result.text())
+              return {
+                title: "git branch",
+                output: JSON.stringify(parsed, null, 2),
+                metadata: parsed as Record<string, any>,
+              }
+            }
 
-      case "stash_list": {
-        const result = await git(["stash", "list"], { cwd })
-        if (result.exitCode !== 0) throw new Error(`git stash list failed: ${result.stderr.toString()}`)
-        const raw = result.text().trim()
-        if (!raw) {
-          return {
-            title: "git stash list",
-            output: JSON.stringify([], null, 2),
-            metadata: { count: 0 },
+            case "show": {
+              if (extra.length === 0) throw new Error("show requires a commit hash argument")
+              const result = yield* git.run(["show", "--stat", ...extra], { cwd })
+              if (result.exitCode !== 0) throw new Error(`git show failed: ${result.stderr.toString()}`)
+              const parsed = parseShow(result.text())
+              return {
+                title: `git show ${extra[0]}`,
+                output: JSON.stringify(parsed, null, 2),
+                metadata: parsed as Record<string, any>,
+              }
+            }
+
+            case "stash_list": {
+              const result = yield* git.run(["stash", "list"], { cwd })
+              if (result.exitCode !== 0) throw new Error(`git stash list failed: ${result.stderr.toString()}`)
+              const raw = result.text().trim()
+              if (!raw) {
+                return {
+                  title: "git stash list",
+                  output: JSON.stringify([], null, 2),
+                  metadata: { count: 0 } as Record<string, any>,
+                }
+              }
+              const parsed = parseStash(raw)
+              return {
+                title: "git stash list",
+                output: JSON.stringify(parsed, null, 2),
+                metadata: { count: parsed.length } as Record<string, any>,
+              }
+            }
+            default:
+              throw new Error(`Unknown git action: ${params.action}`)
           }
-        }
-        const parsed = parseStash(raw)
-        return {
-          title: "git stash list",
-          output: JSON.stringify(parsed, null, 2),
-          metadata: { count: parsed.length },
-        }
-      }
+        }).pipe(Effect.orDie),
     }
-  },
-})
+  }),
+)

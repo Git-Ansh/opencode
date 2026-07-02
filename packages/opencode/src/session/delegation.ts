@@ -1,11 +1,11 @@
-import { Log } from "../util/log"
-import { Global } from "../global"
+import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import fs from "fs/promises"
 
+// Note(port): the original `util/log.ts` Log.create({service}) logger no longer
+// exists (logging moved to Effect's Logger under packages/core/src/observability),
+// and this module never actually logged anything, so the import is just dropped.
 export namespace Delegation {
-  const log = Log.create({ service: "delegation" })
-
   export interface Entry {
     id: string
     sessionID: string

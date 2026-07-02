@@ -1,7 +1,7 @@
-import z from "zod"
 import path from "path"
-import { Tool } from "./tool"
-import { Instance } from "../project/instance"
+import { Schema, Effect } from "effect"
+import * as Tool from "./tool"
+import { InstanceState } from "@/effect/instance-state"
 import { Process } from "@/util/process"
 import DESCRIPTION from "./test.txt"
 
@@ -228,51 +228,59 @@ function parse(fw: Framework, output: string): Partial<Result> {
   }
 }
 
-export const TestTool = Tool.define("test", {
-  description: DESCRIPTION,
-  parameters: z.object({
-    path: z.string().optional().describe("Specific test file or directory"),
-    filter: z.string().optional().describe("Test name filter/grep pattern"),
-    framework: z.string().optional().describe("Override auto-detection: vitest, jest, bun, pytest, cargo, go"),
+const Parameters = Schema.Struct({
+  path: Schema.optional(Schema.String).annotate({ description: "Specific test file or directory" }),
+  filter: Schema.optional(Schema.String).annotate({ description: "Test name filter/grep pattern" }),
+  framework: Schema.optional(Schema.String).annotate({
+    description: "Override auto-detection: vitest, jest, bun, pytest, cargo, go",
   }),
-  async execute(params, ctx) {
-    const cwd = Instance.directory
-    const fw = (params.framework as Framework) || (await detect(cwd))
-    if (!fw) throw new Error("Could not detect test framework. Please specify the `framework` parameter.")
-
-    const cmd = command(fw, params.path, params.filter)
-
-    await ctx.ask({
-      permission: "bash",
-      patterns: [cmd.join(" ")],
-      always: [cmd[0] + " *"],
-      metadata: { framework: fw, path: params.path, filter: params.filter },
-    })
-
-    const result = await Process.run(cmd, { cwd, nothrow: true })
-    const output = result.stdout.toString() + result.stderr.toString()
-    const parsed = parse(fw, output)
-
-    const structured: Result = {
-      framework: fw,
-      passed: parsed.passed || 0,
-      failed: parsed.failed || 0,
-      skipped: parsed.skipped || 0,
-      duration: parsed.duration || "",
-      failures: parsed.failures || [],
-      raw: output,
-    }
-
-    return {
-      title: `test ${fw}${params.path ? ` ${params.path}` : ""}`,
-      output: JSON.stringify(structured, null, 2),
-      metadata: {
-        framework: fw,
-        passed: structured.passed,
-        failed: structured.failed,
-        skipped: structured.skipped,
-        duration: structured.duration,
-      },
-    }
-  },
 })
+
+export const TestTool = Tool.define(
+  "test",
+  Effect.succeed({
+    description: DESCRIPTION,
+    parameters: Parameters,
+    execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      Effect.gen(function* () {
+        const cwd = (yield* InstanceState.context).directory
+        const fw = (params.framework as Framework) || (yield* Effect.promise(() => detect(cwd)))
+        if (!fw) throw new Error("Could not detect test framework. Please specify the `framework` parameter.")
+
+        const cmd = command(fw, params.path, params.filter)
+
+        yield* ctx.ask({
+          permission: "bash",
+          patterns: [cmd.join(" ")],
+          always: [cmd[0] + " *"],
+          metadata: { framework: fw, path: params.path, filter: params.filter },
+        })
+
+        const result = yield* Effect.promise(() => Process.run(cmd, { cwd, nothrow: true }))
+        const output = result.stdout.toString() + result.stderr.toString()
+        const parsed = parse(fw, output)
+
+        const structured: Result = {
+          framework: fw,
+          passed: parsed.passed || 0,
+          failed: parsed.failed || 0,
+          skipped: parsed.skipped || 0,
+          duration: parsed.duration || "",
+          failures: parsed.failures || [],
+          raw: output,
+        }
+
+        return {
+          title: `test ${fw}${params.path ? ` ${params.path}` : ""}`,
+          output: JSON.stringify(structured, null, 2),
+          metadata: {
+            framework: fw,
+            passed: structured.passed,
+            failed: structured.failed,
+            skipped: structured.skipped,
+            duration: structured.duration,
+          },
+        }
+      }).pipe(Effect.orDie),
+  }),
+)

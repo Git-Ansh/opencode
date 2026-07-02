@@ -1,8 +1,12 @@
-import { Log } from "../util/log"
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), which isn't reachable from this
+// plain, non-Effect helper. Falls back to console.error so a redaction event is
+// still observable during development.
+const log = {
+  warn: (message: string, extra?: Record<string, unknown>) => console.error(`[security.redact] ${message}`, extra ?? ""),
+}
 
 export namespace SecretRedaction {
-  const log = Log.create({ service: "security.redact" })
-
   interface Pattern {
     name: string
     regex: RegExp

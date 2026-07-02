@@ -1,187 +1,281 @@
-import { Tool } from "./tool"
-import z from "zod"
-import { Pty } from "../pty"
+import { Context, Schema, Effect } from "effect"
+import * as Tool from "./tool"
+import { Pty } from "@opencode-ai/core/pty"
+import { PtyID } from "@opencode-ai/core/pty/schema"
+import { LocationServiceMap } from "@opencode-ai/core/location-services"
+import { Location } from "@opencode-ai/core/location"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { InstanceState } from "@/effect/instance-state"
 
-export const PtySpawnTool = Tool.define("pty_spawn", async () => {
-  return {
-    description: `Spawn a new interactive pseudo-terminal (PTY) session. Use this for commands that require interactivity (e.g., npm init, git rebase -i, python REPL, ssh).
+// TODO(port): the old `../pty` module (a simple process-global `Pty.create/list/
+// write/remove` namespace) no longer exists. PTY sessions are now a
+// location-scoped Effect service (`@opencode-ai/core/pty`, registered in
+// `packages/core/src/location-services.ts`'s `locationServices` node list) —
+// the same subsystem that backs the interactive terminal panes over the
+// httpapi (see `server/routes/instance/httpapi/handlers/pty.ts`, which this
+// file's `scopedPty` helper mirrors). This means PTY sessions created by this
+// tool live in the same location-scoped registry as the user-facing terminal
+// UI, rather than a tool-private list — worth confirming that's the intended
+// product behavior (e.g. should the LLM be able to see/kill the user's manual
+// terminal panes and vice versa?) in a follow-up review.
+//
+// `LocationServiceMap.Service` is resolved once per tool at Tool.define's
+// init time (like `Git.Service` in tool/git.ts) rather than inside `execute`,
+// because `Tool.Def["execute"]` must return `Effect.Effect<ExecuteResult<M>>`
+// with no outstanding requirements (R = never) — resolving it up front and
+// closing over it is what lets `scopedPty` fully discharge Pty.Service's
+// requirement per call via `Effect.provide`.
+function makePtyOps(locations: Context.Service.Shape<typeof LocationServiceMap.Service>) {
+  function scopedPty<A, E, R>(effect: Effect.Effect<A, E, R>) {
+    return Effect.gen(function* () {
+      const ctx = yield* InstanceState.context
+      return yield* effect.pipe(
+        Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))),
+      )
+    })
+  }
+
+  const getOrUndefined = (id: typeof PtyID.Type) =>
+    scopedPty(Pty.Service.use((service) => service.get(id))).pipe(
+      Effect.catchTag("Pty.NotFoundError", () => Effect.succeed(undefined)),
+    )
+
+  return { scopedPty, getOrUndefined }
+}
+
+const SpawnParameters = Schema.Struct({
+  command: Schema.optional(Schema.String).annotate({ description: "Command to run (defaults to system shell)" }),
+  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Command arguments" }),
+  cwd: Schema.optional(Schema.String).annotate({ description: "Working directory" }),
+  title: Schema.optional(Schema.String).annotate({ description: "Title for this PTY session" }),
+})
+
+export const PtySpawnTool = Tool.define(
+  "pty_spawn",
+  Effect.gen(function* () {
+    const { scopedPty } = makePtyOps(yield* LocationServiceMap.Service)
+
+    return {
+      description: `Spawn a new interactive pseudo-terminal (PTY) session. Use this for commands that require interactivity (e.g., npm init, git rebase -i, python REPL, ssh).
 
 Returns a PTY session ID. Use pty_read to get output, pty_write to send input, pty_kill to terminate.
 
 IMPORTANT: Only use PTY for truly interactive commands. For normal commands, use the regular bash tool.`,
-    parameters: z.object({
-      command: z.string().optional().describe("Command to run (defaults to system shell)"),
-      args: z.array(z.string()).optional().describe("Command arguments"),
-      cwd: z.string().optional().describe("Working directory"),
-      title: z.string().optional().describe("Title for this PTY session"),
-    }),
-    async execute(params, ctx) {
-      await ctx.ask({
-        permission: "bash",
-        patterns: [params.command ?? "shell"],
-        always: ["*"],
-        metadata: { command: params.command, type: "pty" },
-      })
+      parameters: SpawnParameters,
+      execute: (params: Schema.Schema.Type<typeof SpawnParameters>, ctx: Tool.Context) =>
+        Effect.gen(function* () {
+          yield* ctx.ask({
+            permission: "bash",
+            patterns: [params.command ?? "shell"],
+            always: ["*"],
+            metadata: { command: params.command, type: "pty" },
+          })
 
-      const info = await Pty.create({
-        command: params.command,
-        args: params.args,
-        cwd: params.cwd,
-        title: params.title,
-      })
+          const info = yield* scopedPty(
+            Pty.Service.use((service) =>
+              service.create({
+                command: params.command,
+                args: params.args ? Array.from(params.args) : undefined,
+                cwd: params.cwd,
+                title: params.title,
+              }),
+            ),
+          )
 
-      return {
-        title: `PTY: ${params.command ?? "shell"}`,
-        metadata: { ptyId: info.id, pid: info.pid },
-        output: [
-          `PTY session created: ${info.id}`,
-          `Command: ${info.command} ${info.args.join(" ")}`,
-          `PID: ${info.pid}`,
-          ``,
-          `Use pty_read("${info.id}") to see output`,
-          `Use pty_write("${info.id}", "input\\n") to send input`,
-          `Use pty_kill("${info.id}") to terminate`,
-        ].join("\n"),
-      }
-    },
-  }
+          return {
+            title: `PTY: ${params.command ?? "shell"}`,
+            metadata: { ptyId: info.id, pid: info.pid } as Record<string, any>,
+            output: [
+              `PTY session created: ${info.id}`,
+              `Command: ${info.command} ${info.args.join(" ")}`,
+              `PID: ${info.pid}`,
+              ``,
+              `Use pty_read("${info.id}") to see output`,
+              `Use pty_write("${info.id}", "input\\n") to send input`,
+              `Use pty_kill("${info.id}") to terminate`,
+            ].join("\n"),
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)
+
+const ReadParameters = Schema.Struct({
+  id: Schema.String.annotate({ description: "PTY session ID" }),
+  tail: Schema.optional(Schema.Number).annotate({
+    description: "Number of characters from the end to return (default: all)",
+  }),
 })
 
-export const PtyReadTool = Tool.define("pty_read", async () => {
-  return {
-    description: "Read the current output buffer from a PTY session. Returns the accumulated terminal output.",
-    parameters: z.object({
-      id: z.string().describe("PTY session ID"),
-      tail: z.number().optional().describe("Number of characters from the end to return (default: all)"),
-    }),
-    async execute(params) {
-      const sessions = Pty.list()
-      const session = sessions.find((s) => s.id === params.id)
+export const PtyReadTool = Tool.define(
+  "pty_read",
+  Effect.gen(function* () {
+    const { scopedPty, getOrUndefined } = makePtyOps(yield* LocationServiceMap.Service)
 
-      if (!session) {
-        // Check if it was a known session that exited
-        return {
-          title: "PTY not found",
-          metadata: {},
-          output: `No PTY session found with ID: ${params.id}. It may have exited.`,
-        }
-      }
+    return {
+      description: "Read the current output buffer from a PTY session. Returns the accumulated terminal output.",
+      parameters: ReadParameters,
+      execute: (params: Schema.Schema.Type<typeof ReadParameters>) =>
+        Effect.gen(function* () {
+          const id = PtyID.make(params.id)
+          const session = yield* getOrUndefined(id)
 
-      // Access the internal state to get buffer
-      const internal = (Pty as any).state?.()?.get?.(params.id)
-      if (!internal) {
-        return {
-          title: `PTY: ${session.id}`,
-          metadata: { status: session.status },
-          output: `PTY session ${session.id} exists but buffer is not accessible.`,
-        }
-      }
+          if (!session) {
+            return {
+              title: "PTY not found",
+              metadata: {} as Record<string, any>,
+              output: `No PTY session found with ID: ${params.id}. It may have exited.`,
+            }
+          }
 
-      let buffer = internal.buffer as string
-      if (params.tail && buffer.length > params.tail) {
-        buffer = buffer.slice(-params.tail)
-      }
+          // A one-shot "read the current buffer" snapshot: attach just long
+          // enough to capture the replay + cursor, then immediately detach —
+          // this tool has no live/streaming read mode.
+          const attachment = yield* scopedPty(
+            Pty.Service.use((service) => service.attach(id, { onData: () => {}, onEnd: () => {} })),
+          ).pipe(Effect.catch(() => Effect.succeed(undefined)))
 
-      return {
-        title: `PTY output: ${session.id}`,
-        metadata: { status: session.status, pid: session.pid },
-        output: buffer || "(no output yet)",
-      }
-    },
-  }
+          if (!attachment) {
+            return {
+              title: `PTY: ${session.id}`,
+              metadata: { status: session.status } as Record<string, any>,
+              output: `PTY session ${session.id} exists but its buffer is not accessible (process already exited).`,
+            }
+          }
+
+          attachment.detach()
+          let buffer = attachment.replay
+          if (params.tail && buffer.length > params.tail) {
+            buffer = buffer.slice(-params.tail)
+          }
+
+          return {
+            title: `PTY output: ${session.id}`,
+            metadata: { status: session.status, pid: session.pid } as Record<string, any>,
+            output: buffer || "(no output yet)",
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)
+
+const WriteParameters = Schema.Struct({
+  id: Schema.String.annotate({ description: "PTY session ID" }),
+  input: Schema.String.annotate({ description: "Text to send to the PTY (use \\n for Enter key)" }),
 })
 
-export const PtyWriteTool = Tool.define("pty_write", async () => {
-  return {
-    description:
-      "Send input to a running PTY session. Use \\n for Enter, \\t for Tab. The input is written to the terminal's stdin.",
-    parameters: z.object({
-      id: z.string().describe("PTY session ID"),
-      input: z.string().describe("Text to send to the PTY (use \\n for Enter key)"),
-    }),
-    async execute(params, ctx) {
-      const session = Pty.list().find((s) => s.id === params.id)
-      if (!session) {
-        return {
-          title: "PTY not found",
-          metadata: {},
-          output: `No PTY session found with ID: ${params.id}`,
-        }
-      }
+export const PtyWriteTool = Tool.define(
+  "pty_write",
+  Effect.gen(function* () {
+    const { scopedPty, getOrUndefined } = makePtyOps(yield* LocationServiceMap.Service)
 
-      if (session.status !== "running") {
-        return {
-          title: "PTY not running",
-          metadata: {},
-          output: `PTY session ${params.id} has already exited.`,
-        }
-      }
+    return {
+      description:
+        "Send input to a running PTY session. Use \\n for Enter, \\t for Tab. The input is written to the terminal's stdin.",
+      parameters: WriteParameters,
+      execute: (params: Schema.Schema.Type<typeof WriteParameters>) =>
+        Effect.gen(function* () {
+          const id = PtyID.make(params.id)
+          const session = yield* getOrUndefined(id)
+          if (!session) {
+            return {
+              title: "PTY not found",
+              metadata: {} as Record<string, any>,
+              output: `No PTY session found with ID: ${params.id}`,
+            }
+          }
 
-      // Interpret escape sequences
-      const input = params.input.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\r/g, "\r")
+          if (session.status !== "running") {
+            return {
+              title: "PTY not running",
+              metadata: {} as Record<string, any>,
+              output: `PTY session ${params.id} has already exited.`,
+            }
+          }
 
-      Pty.write(params.id, input)
+          // Interpret escape sequences
+          const input = params.input.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\r/g, "\r")
 
-      return {
-        title: `PTY input sent: ${params.id}`,
-        metadata: { ptyId: params.id },
-        output: `Sent ${input.length} characters to PTY ${params.id}. Use pty_read to see the result.`,
-      }
-    },
-  }
+          yield* scopedPty(Pty.Service.use((service) => service.write(id, input)))
+
+          return {
+            title: `PTY input sent: ${params.id}`,
+            metadata: { ptyId: params.id } as Record<string, any>,
+            output: `Sent ${input.length} characters to PTY ${params.id}. Use pty_read to see the result.`,
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)
+
+const KillParameters = Schema.Struct({
+  id: Schema.String.annotate({ description: "PTY session ID to kill" }),
 })
 
-export const PtyKillTool = Tool.define("pty_kill", async () => {
-  return {
-    description: "Kill a PTY session and its running process.",
-    parameters: z.object({
-      id: z.string().describe("PTY session ID to kill"),
-    }),
-    async execute(params) {
-      const session = Pty.list().find((s) => s.id === params.id)
-      if (!session) {
-        return {
-          title: "PTY not found",
-          metadata: {},
-          output: `No PTY session found with ID: ${params.id}`,
-        }
-      }
+export const PtyKillTool = Tool.define(
+  "pty_kill",
+  Effect.gen(function* () {
+    const { scopedPty, getOrUndefined } = makePtyOps(yield* LocationServiceMap.Service)
 
-      await Pty.remove(params.id)
+    return {
+      description: "Kill a PTY session and its running process.",
+      parameters: KillParameters,
+      execute: (params: Schema.Schema.Type<typeof KillParameters>) =>
+        Effect.gen(function* () {
+          const id = PtyID.make(params.id)
+          const session = yield* getOrUndefined(id)
+          if (!session) {
+            return {
+              title: "PTY not found",
+              metadata: {} as Record<string, any>,
+              output: `No PTY session found with ID: ${params.id}`,
+            }
+          }
 
-      return {
-        title: `PTY killed: ${params.id}`,
-        metadata: { ptyId: params.id },
-        output: `PTY session ${params.id} has been terminated.`,
-      }
-    },
-  }
-})
+          yield* scopedPty(Pty.Service.use((service) => service.remove(id)))
 
-export const PtyListTool = Tool.define("pty_list", async () => {
-  return {
-    description: "List all active PTY sessions with their status.",
-    parameters: z.object({}),
-    async execute() {
-      const sessions = Pty.list()
+          return {
+            title: `PTY killed: ${params.id}`,
+            metadata: { ptyId: params.id } as Record<string, any>,
+            output: `PTY session ${params.id} has been terminated.`,
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)
 
-      if (sessions.length === 0) {
-        return {
-          title: "No PTY sessions",
-          metadata: {},
-          output: "No active PTY sessions. Use pty_spawn to create one.",
-        }
-      }
+const ListParameters = Schema.Struct({})
 
-      const lines = sessions.map(
-        (s) => `- ${s.id}: ${s.command} ${s.args.join(" ")} [${s.status}] (PID: ${s.pid}) "${s.title}"`,
-      )
+export const PtyListTool = Tool.define(
+  "pty_list",
+  Effect.gen(function* () {
+    const { scopedPty } = makePtyOps(yield* LocationServiceMap.Service)
 
-      return {
-        title: `${sessions.length} PTY session(s)`,
-        metadata: {},
-        output: lines.join("\n"),
-      }
-    },
-  }
-})
+    return {
+      description: "List all active PTY sessions with their status.",
+      parameters: ListParameters,
+      execute: (_params: Schema.Schema.Type<typeof ListParameters>) =>
+        Effect.gen(function* () {
+          const sessions = yield* scopedPty(Pty.Service.use((service) => service.list()))
+
+          if (sessions.length === 0) {
+            return {
+              title: "No PTY sessions",
+              metadata: {},
+              output: "No active PTY sessions. Use pty_spawn to create one.",
+            }
+          }
+
+          const lines = sessions.map(
+            (s) => `- ${s.id}: ${s.command} ${s.args.join(" ")} [${s.status}] (PID: ${s.pid}) "${s.title}"`,
+          )
+
+          return {
+            title: `${sessions.length} PTY session(s)`,
+            metadata: {},
+            output: lines.join("\n"),
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)

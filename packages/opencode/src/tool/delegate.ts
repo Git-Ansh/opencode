@@ -1,197 +1,256 @@
-import { Tool } from "./tool"
-import z from "zod"
-import { Session } from "../session"
+import * as Tool from "./tool"
+import { Schema, Effect, Scope } from "effect"
+import { Session } from "../session/session"
 import { MessageV2 } from "../session/message-v2"
-import { Identifier } from "../id/id"
 import { Agent } from "../agent/agent"
 import { SessionPrompt } from "../session/prompt"
 import { Delegation } from "../session/delegation"
-import { Log } from "../util/log"
+import { Database } from "@opencode-ai/core/database/database"
 
-const log = Log.create({ service: "tool.delegate" })
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts). This module now runs natively
+// inside the Effect world (Tool.define wraps execute in Effect.gen), but the
+// per-call logging below happens after the fire-and-forget prompt completes,
+// outside the tool's own call span, so it's kept as a lightweight console
+// logger rather than threading an Effect logger through the fork.
+const log = {
+  info: (message: string, extra?: Record<string, unknown>) => console.error(`[tool.delegate] ${message}`, extra ?? ""),
+  error: (message: string, extra?: Record<string, unknown>) => console.error(`[tool.delegate] ${message}`, extra ?? ""),
+}
 
-export const DelegateTool = Tool.define("delegate", async () => {
-  const agents = await Agent.list().then((x) =>
-    x.filter((a) => a.mode === "subagent" && ["explore", "researcher", "reviewer"].includes(a.name)),
-  )
-  const agentNames = agents.map((a) => a.name)
+// Note(port): the field-level `agent` description used to list the dynamically
+// resolved agent names (only known once `Agent.Service.list()` resolves inside
+// the tool's init Effect). Keeping the schema's *shape* static/hoisted (needed
+// so TypeScript can infer `execute`'s params type — see tool/task.ts for the
+// established pattern) means that per-field annotation can no longer embed the
+// live agent list; the tool's top-level `description` string still does,
+// since that's plain runtime text with no effect on the schema's type.
+const DelegateParameters = Schema.Struct({
+  prompt: Schema.String.annotate({ description: "The research task to perform" }),
+  agent: Schema.String.annotate({ description: "Agent type to use (see tool description for available agents)" }),
+  title: Schema.String.annotate({ description: "Short title for this delegation (3-5 words)" }),
+})
 
-  return {
-    description: `Fire off an async research task that runs in the background. Returns immediately with a delegation ID. Use delegation_read to get results later. The task runs in a read-only sub-agent session.
+// TODO(port): `tool/task.ts` (the native `task` tool) is the modern,
+// fully-Effect-native equivalent of a single delegated subagent call — it
+// even has a `background: true` mode with BackgroundJob-backed notification
+// on completion, which is close to what this file's "fire-and-forget +
+// delegation_read" design does by hand. Keeping this file as its own
+// tool (as originally ported) since it targets a narrower set of read-only
+// agents and a simpler polling-based read-back model, but it may be worth
+// consolidating with `task` in a later pass.
+export const DelegateTool = Tool.define(
+  "delegate",
+  Effect.gen(function* () {
+    const agent = yield* Agent.Service
+    const sessions = yield* Session.Service
+    const sessionPrompt = yield* SessionPrompt.Service
+    const database = yield* Database.Service
+    const scope = yield* Scope.Scope
+
+    const agents = (yield* agent.list()).filter(
+      (a) => a.mode === "subagent" && ["explore", "researcher", "reviewer"].includes(a.name),
+    )
+    const agentNames = agents.map((a) => a.name)
+
+    return {
+      description: `Fire off an async research task that runs in the background. Returns immediately with a delegation ID. Use delegation_read to get results later. The task runs in a read-only sub-agent session.
 
 Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")}`,
-    parameters: z.object({
-      prompt: z.string().describe("The research task to perform"),
-      agent: z.string().describe(`Agent type to use: ${agentNames.join(", ")}`),
-      title: z.string().describe("Short title for this delegation (3-5 words)"),
-    }),
-    async execute(params, ctx) {
-      const agent = await Agent.get(params.agent)
-      if (!agent) throw new Error(`Unknown agent: ${params.agent}. Available: ${agentNames.join(", ")}`)
+      parameters: DelegateParameters,
+      execute: (params: Schema.Schema.Type<typeof DelegateParameters>, ctx: Tool.Context) =>
+        Effect.gen(function* () {
+          const next = yield* agent.get(params.agent)
+          if (!next) return yield* Effect.fail(new Error(`Unknown agent: ${params.agent}. Available: ${agentNames.join(", ")}`))
 
-      // Only allow read-only agents
-      if (!["explore", "researcher", "reviewer"].includes(params.agent)) {
-        throw new Error(`Only read-only agents (explore, researcher, reviewer) can be delegated`)
-      }
+          // Only allow read-only agents
+          if (!["explore", "researcher", "reviewer"].includes(params.agent)) {
+            return yield* Effect.fail(new Error(`Only read-only agents (explore, researcher, reviewer) can be delegated`))
+          }
 
-      await ctx.ask({
-        permission: "task",
-        patterns: [params.agent],
-        always: ["*"],
-        metadata: {
-          description: params.title,
-          subagent_type: params.agent,
-          async: true,
-        },
-      })
-
-      const delegationID = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-
-      const session = await Session.create({
-        parentID: ctx.sessionID,
-        title: `[async] ${params.title} (@${agent.name})`,
-      })
-
-      await Delegation.save({
-        id: delegationID,
-        sessionID: ctx.sessionID,
-        agentSessionID: session.id,
-        title: params.title,
-        prompt: params.prompt,
-        agent: params.agent,
-        status: "running",
-        startTime: Date.now(),
-      })
-
-      const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
-      const model = agent.model ?? {
-        modelID: (msg.info as any).modelID,
-        providerID: (msg.info as any).providerID,
-      }
-
-      // Fire and forget — don't await
-      const messageID = Identifier.ascending("message")
-      const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
-
-      SessionPrompt.prompt({
-        messageID,
-        sessionID: session.id,
-        model,
-        agent: agent.name,
-        tools: { todowrite: false, todoread: false, task: false },
-        parts: promptParts,
-      })
-        .then(async (result) => {
-          const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
-          await Delegation.update(delegationID, {
-            status: "completed",
-            output: text,
-            summary: text.slice(0, 200),
-            endTime: Date.now(),
+          yield* ctx.ask({
+            permission: "task",
+            patterns: [params.agent],
+            always: ["*"],
+            metadata: {
+              description: params.title,
+              subagent_type: params.agent,
+              async: true,
+            },
           })
-          log.info("delegation completed", { id: delegationID })
-        })
-        .catch(async (err) => {
-          await Delegation.update(delegationID, {
-            status: "error",
-            output: err instanceof Error ? err.message : String(err),
-            endTime: Date.now(),
+
+          const delegationID = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+
+          const session = yield* sessions.create({
+            parentID: ctx.sessionID,
+            title: `[async] ${params.title} (@${next.name})`,
           })
-          log.error("delegation failed", { id: delegationID, error: err })
-        })
 
-      ctx.metadata({
-        title: `Delegated: ${params.title}`,
-        metadata: { delegationID, sessionId: session.id },
-      })
+          yield* Effect.promise(() =>
+            Delegation.save({
+              id: delegationID,
+              sessionID: ctx.sessionID,
+              agentSessionID: session.id,
+              title: params.title,
+              prompt: params.prompt,
+              agent: params.agent,
+              status: "running",
+              startTime: Date.now(),
+            }),
+          )
 
-      return {
-        title: `Delegated: ${params.title}`,
-        metadata: { delegationID, sessionId: session.id },
-        output: [
-          `Delegation ${delegationID} started (agent: ${params.agent}).`,
-          `The task is running in the background.`,
-          `Use delegation_read with id "${delegationID}" to check results later.`,
-        ].join("\n"),
-      }
-    },
-  }
+          const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.orDie,
+          )
+          const model =
+            next.model ??
+            (msg.info.role === "assistant"
+              ? { modelID: msg.info.modelID, providerID: msg.info.providerID }
+              : undefined)
+          if (!model) return yield* Effect.fail(new Error("No model available to run the delegated agent"))
+
+          // Fire and forget — don't await
+          const promptParts = yield* sessionPrompt.resolvePromptParts(params.prompt)
+
+          yield* sessionPrompt
+            .prompt({
+              sessionID: session.id,
+              model,
+              agent: next.name,
+              parts: promptParts,
+            })
+            .pipe(
+              Effect.matchEffect({
+                onSuccess: (result) =>
+                  Effect.promise(async () => {
+                    const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+                    await Delegation.update(delegationID, {
+                      status: "completed",
+                      output: text,
+                      summary: text.slice(0, 200),
+                      endTime: Date.now(),
+                    })
+                    log.info("delegation completed", { id: delegationID })
+                  }),
+                onFailure: (err) =>
+                  Effect.promise(async () => {
+                    await Delegation.update(delegationID, {
+                      status: "error",
+                      output: err instanceof Error ? err.message : String(err),
+                      endTime: Date.now(),
+                    })
+                    log.error("delegation failed", { id: delegationID, error: err })
+                  }),
+              }),
+              Effect.forkIn(scope, { startImmediately: true }),
+            )
+
+          yield* ctx.metadata({
+            title: `Delegated: ${params.title}`,
+            metadata: { delegationID, sessionId: session.id },
+          })
+
+          return {
+            title: `Delegated: ${params.title}`,
+            metadata: { delegationID, sessionId: session.id },
+            output: [
+              `Delegation ${delegationID} started (agent: ${params.agent}).`,
+              `The task is running in the background.`,
+              `Use delegation_read with id "${delegationID}" to check results later.`,
+            ].join("\n"),
+          }
+        }).pipe(Effect.orDie),
+    }
+  }),
+)
+
+const DelegationReadParameters = Schema.Struct({
+  id: Schema.String.annotate({ description: "The delegation ID returned by the delegate tool" }),
 })
 
-export const DelegationReadTool = Tool.define("delegation_read", async () => {
-  return {
-    description:
-      "Read the result of a background delegation task. Returns the current status and output if completed.",
-    parameters: z.object({
-      id: z.string().describe("The delegation ID returned by the delegate tool"),
-    }),
-    async execute(params) {
-      const entry = await Delegation.get(params.id)
-      if (!entry) {
-        return {
-          title: "Delegation not found",
-          metadata: {},
-          output: `No delegation found with ID: ${params.id}`,
-        }
-      }
+export const DelegationReadTool = Tool.define(
+  "delegation_read",
+  Effect.gen(function* () {
+    return {
+      description:
+        "Read the result of a background delegation task. Returns the current status and output if completed.",
+      parameters: DelegationReadParameters,
+      execute: (params: Schema.Schema.Type<typeof DelegationReadParameters>) =>
+        Effect.promise(async () => {
+          const entry = await Delegation.get(params.id)
+          if (!entry) {
+            return {
+              title: "Delegation not found",
+              metadata: {} as Record<string, any>,
+              output: `No delegation found with ID: ${params.id}`,
+            }
+          }
 
-      const elapsed = entry.endTime
-        ? `${((entry.endTime - entry.startTime) / 1000).toFixed(1)}s`
-        : `${((Date.now() - entry.startTime) / 1000).toFixed(1)}s (still running)`
+          const elapsed = entry.endTime
+            ? `${((entry.endTime - entry.startTime) / 1000).toFixed(1)}s`
+            : `${((Date.now() - entry.startTime) / 1000).toFixed(1)}s (still running)`
 
-      const lines = [
-        `Delegation: ${entry.title}`,
-        `Status: ${entry.status}`,
-        `Agent: ${entry.agent}`,
-        `Duration: ${elapsed}`,
-        `Session: ${entry.agentSessionID}`,
-        "",
-      ]
+          const lines = [
+            `Delegation: ${entry.title}`,
+            `Status: ${entry.status}`,
+            `Agent: ${entry.agent}`,
+            `Duration: ${elapsed}`,
+            `Session: ${entry.agentSessionID}`,
+            "",
+          ]
 
-      if (entry.status === "completed" && entry.output) {
-        lines.push("<delegation_result>", entry.output, "</delegation_result>")
-      } else if (entry.status === "error" && entry.output) {
-        lines.push(`Error: ${entry.output}`)
-      } else {
-        lines.push("Task is still running. Check back later.")
-      }
+          if (entry.status === "completed" && entry.output) {
+            lines.push("<delegation_result>", entry.output, "</delegation_result>")
+          } else if (entry.status === "error" && entry.output) {
+            lines.push(`Error: ${entry.output}`)
+          } else {
+            lines.push("Task is still running. Check back later.")
+          }
 
-      return {
-        title: `Delegation: ${entry.title} (${entry.status})`,
-        metadata: { delegationID: entry.id, status: entry.status },
-        output: lines.join("\n"),
-      }
-    },
-  }
-})
+          return {
+            title: `Delegation: ${entry.title} (${entry.status})`,
+            metadata: { delegationID: entry.id, status: entry.status },
+            output: lines.join("\n"),
+          }
+        }),
+    }
+  }),
+)
 
-export const DelegationListTool = Tool.define("delegation_list", async () => {
-  return {
-    description: "List all background delegation tasks for the current session with their status.",
-    parameters: z.object({}),
-    async execute(_params, ctx) {
-      const entries = await Delegation.list(ctx.sessionID)
+const DelegationListParameters = Schema.Struct({})
 
-      if (entries.length === 0) {
-        return {
-          title: "No delegations",
-          metadata: {},
-          output: "No background delegations have been created in this session.",
-        }
-      }
+export const DelegationListTool = Tool.define(
+  "delegation_list",
+  Effect.gen(function* () {
+    return {
+      description: "List all background delegation tasks for the current session with their status.",
+      parameters: DelegationListParameters,
+      execute: (_params: Schema.Schema.Type<typeof DelegationListParameters>, ctx: Tool.Context) =>
+        Effect.promise(async () => {
+          const entries = await Delegation.list(ctx.sessionID)
 
-      const lines = entries.map((e) => {
-        const elapsed = e.endTime
-          ? `${((e.endTime - e.startTime) / 1000).toFixed(1)}s`
-          : `${((Date.now() - e.startTime) / 1000).toFixed(1)}s`
-        return `- [${e.status}] ${e.id}: ${e.title} (${e.agent}, ${elapsed})`
-      })
+          if (entries.length === 0) {
+            return {
+              title: "No delegations",
+              metadata: {},
+              output: "No background delegations have been created in this session.",
+            }
+          }
 
-      return {
-        title: `${entries.length} delegation(s)`,
-        metadata: {},
-        output: lines.join("\n"),
-      }
-    },
-  }
-})
+          const lines = entries.map((e) => {
+            const elapsed = e.endTime
+              ? `${((e.endTime - e.startTime) / 1000).toFixed(1)}s`
+              : `${((Date.now() - e.startTime) / 1000).toFixed(1)}s`
+            return `- [${e.status}] ${e.id}: ${e.title} (${e.agent}, ${elapsed})`
+          })
+
+          return {
+            title: `${entries.length} delegation(s)`,
+            metadata: {},
+            output: lines.join("\n"),
+          }
+        }),
+    }
+  }),
+)

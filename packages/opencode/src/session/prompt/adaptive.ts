@@ -1,4 +1,5 @@
-import { Instance } from "../../project/instance"
+import { AppRuntime } from "@/effect/app-runtime"
+import { InstanceState } from "@/effect/instance-state"
 import path from "path"
 
 import MOD_TYPESCRIPT from "./modules/typescript.txt"
@@ -19,7 +20,8 @@ export namespace AdaptivePrompt {
   const cache = new Map<string, ProjectInfo>()
 
   export async function detect(): Promise<ProjectInfo> {
-    const dir = Instance.worktree
+    const ctx = await AppRuntime.runPromise(InstanceState.context)
+    const dir = ctx.worktree
     const cached = cache.get(dir)
     if (cached) return cached
 

@@ -1,11 +1,13 @@
 import fs from "fs/promises"
 import path from "path"
-import { Instance } from "../project/instance"
-import { git } from "../util/git"
-import { Log } from "../util/log"
+import { AppRuntime } from "@/effect/app-runtime"
+import { InstanceState } from "@/effect/instance-state"
+import { Git } from "@/git"
 
+// Note(port): the original `util/log.ts` Log.create({service}) logger no longer
+// exists (logging moved to Effect's Logger under packages/core/src/observability),
+// and this module never actually logged anything, so the import is just dropped.
 export namespace ContextInjection {
-  const log = Log.create({ service: "context.injection" })
   const MAX_TOKENS = 4000
   const CHARS_PER_TOKEN = 4
 
@@ -16,15 +18,16 @@ export namespace ContextInjection {
   }
 
   export async function gather(): Promise<string[]> {
+    const ctx = await AppRuntime.runPromise(InstanceState.context)
     // Non-git projects have worktree="/", avoid running git commands with cwd: "/"
-    if (Instance.project.vcs !== "git") return []
+    if (ctx.project.vcs !== "git") return []
 
     const sources: Source[] = []
-    const dir = Instance.directory
+    const dir = ctx.directory
 
     // Git diff summary
     try {
-      const result = await git(["diff", "--stat", "HEAD"], { cwd: dir })
+      const result = await AppRuntime.runPromise(Git.Service.use((git) => git.run(["diff", "--stat", "HEAD"], { cwd: dir })))
       if (result.exitCode === 0) {
         const text = result.text().trim()
         if (text) {
@@ -35,7 +38,7 @@ export namespace ContextInjection {
 
     // Git status
     try {
-      const result = await git(["status", "--short"], { cwd: dir })
+      const result = await AppRuntime.runPromise(Git.Service.use((git) => git.run(["status", "--short"], { cwd: dir })))
       if (result.exitCode === 0) {
         const text = result.text().trim()
         if (text) {

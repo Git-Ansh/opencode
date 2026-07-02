@@ -1,9 +1,13 @@
-import { Log } from "../util/log"
-import type { MessageV2 } from "./message-v2"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+
+// TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
+// (packages/core/src/observability/logging.ts), not reachable from this plain
+// helper that runs outside the Effect runtime. Falls back to console.error.
+const log = {
+  info: (message: string, extra?: Record<string, unknown>) => console.error(`[context-pruning] ${message}`, extra ?? ""),
+}
 
 export namespace ContextPruning {
-  const log = Log.create({ service: "context-pruning" })
-
   // Protected tools whose outputs should never be pruned
   const PROTECTED_TOOLS = new Set(["todowrite", "todoread", "skill", "question", "plan_enter", "plan_exit"])
 
@@ -11,7 +15,7 @@ export namespace ContextPruning {
    * Apply all ephemeral context pruning passes on a deep-cloned message array.
    * Never touches the database — all mutations are in-memory only.
    */
-  export function apply(messages: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  export function apply(messages: SessionV1.WithParts[]): SessionV1.WithParts[] {
     const msgs = structuredClone(messages)
     const deduped = deduplicateToolCalls(msgs)
     const superseded = supersedeWrites(msgs)
@@ -26,7 +30,7 @@ export namespace ContextPruning {
    * Deduplicate repeated tool calls with identical tool+input.
    * Walk backwards (newest first), keep the most recent, replace older duplicates.
    */
-  function deduplicateToolCalls(msgs: MessageV2.WithParts[]): number {
+  function deduplicateToolCalls(msgs: SessionV1.WithParts[]): number {
     const seen = new Map<string, number>() // key -> message index of most recent
     let count = 0
 
@@ -56,7 +60,7 @@ export namespace ContextPruning {
    * Supersede write/edit outputs when the file was later read.
    * If we read a file after writing it, the write output is redundant.
    */
-  function supersedeWrites(msgs: MessageV2.WithParts[]): number {
+  function supersedeWrites(msgs: SessionV1.WithParts[]): number {
     // Collect all file paths that were read (walk backwards)
     const readPaths = new Set<string>()
     const readIndex = new Map<string, number>() // path -> first (latest) read index
@@ -102,7 +106,7 @@ export namespace ContextPruning {
    * Purge detailed input from old error tool parts.
    * Keep the error message but remove verbose input content for errors older than N turns.
    */
-  function purgeOldErrors(msgs: MessageV2.WithParts[], turnsAgo: number = 4): number {
+  function purgeOldErrors(msgs: SessionV1.WithParts[], turnsAgo: number = 4): number {
     // Count user turns from the end
     let userTurns = 0
     const turnCutoff: number[] = []
