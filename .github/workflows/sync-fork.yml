@@ -1,0 +1,54 @@
+name: Sync dev mirror from upstream
+
+# Keeps this fork's `dev` branch an exact mirror of anomalyco/opencode's `dev`,
+# automatically — so you never have to `git fetch upstream` by hand again.
+#
+# It ONLY updates `dev`. It does not touch your work branch, because merging
+# upstream into your own code needs human/AI conflict resolution. When `dev`
+# moves, you merge it into your work branch yourself (or ask Claude to).
+#
+# It also reports, in the run summary, how far your work branch has fallen
+# behind `dev`, so you get a nudge when it's time to integrate.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # every Monday 06:00 UTC
+  workflow_dispatch: {} # adds a "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-dev
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward origin/dev to upstream/dev
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream dev
+          # origin/dev has no commits of its own (pure mirror), so this is always
+          # a fast-forward. If it ever isn't, the push is rejected rather than
+          # force-pushed — the safe outcome.
+          git push origin FETCH_HEAD:refs/heads/dev
+          echo "dev synced to $(git rev-parse --short FETCH_HEAD)"
+
+      - name: Report how far your work branch is behind
+        run: |
+          set -euo pipefail
+          WORK_BRANCH="port"   # change this if you rename your work branch
+          git fetch origin "$WORK_BRANCH" dev || exit 0
+          behind=$(git rev-list --count "origin/${WORK_BRANCH}..origin/dev")
+          if [ "$behind" -eq 0 ]; then
+            echo "✅ Your \`${WORK_BRANCH}\` branch is up to date with \`dev\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ Your \`${WORK_BRANCH}\` branch is **${behind} commits behind** \`dev\`. Time to merge \`dev\` into it." >> "$GITHUB_STEP_SUMMARY"
+          fi
