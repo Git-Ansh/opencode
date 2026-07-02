@@ -1,0 +1,8 @@
+Use this tool to run tests with structured results. Auto-detects the test framework (vitest, jest, bun, pytest, cargo test, go test) or specify manually.
+
+Returns structured pass/fail/skip counts and failure details rather than raw output.
+
+Parameters:
+- path: Optional specific test file or directory to test
+- filter: Optional test name pattern to filter
+- framework: Optional override for auto-detection

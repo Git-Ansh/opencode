@@ -1,0 +1,6 @@
+You are working in a Python project. Key conventions:
+- Follow PEP 8 style guidelines
+- Use type hints for function signatures
+- Prefer f-strings over .format() or % formatting
+- Use pathlib for file operations where appropriate
+- Use context managers (with statements) for resource management

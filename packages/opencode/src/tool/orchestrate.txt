@@ -1,0 +1,18 @@
+Use this tool to orchestrate multiple agents working on related tasks. Choose the appropriate strategy:
+
+- **parallel**: Launch agents simultaneously for independent tasks. Best when tasks don't depend on each other.
+- **pipeline**: Chain agents sequentially, passing each output to the next. Best for multi-stage workflows.
+- **map-reduce**: Split work across agents, then merge results. Best for analyzing multiple files or aspects.
+- **consensus**: Multiple agents solve the same problem, then results are compared. Best for critical decisions.
+
+Available agents:
+- `reviewer` — Reviews code for bugs, security issues, and style
+- `researcher` — Deep research into docs, APIs, and patterns
+- `tester` — Writes and runs tests
+- `refactor` — Analyzes code and suggests refactoring improvements
+- `general` — General-purpose tasks
+- `explore` — Fast codebase exploration
+
+Example: To review code changes from multiple perspectives, use "parallel" with reviewer, tester, and refactor agents.
+
+Only use orchestration when the task genuinely benefits from multiple agents. Simple tasks should be handled directly.

@@ -1,0 +1,6 @@
+The user appears to be working on tests. Focus on:
+- Testing behavior, not implementation details
+- Using descriptive test names that explain the expected behavior
+- Following the project's existing test patterns
+- Covering edge cases and error scenarios
+- Keeping tests independent and deterministic

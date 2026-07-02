@@ -1,0 +1,6 @@
+You are working with React. Key conventions:
+- Use functional components with hooks
+- Prefer composition over inheritance
+- Use React.memo only when profiling shows benefit
+- Keep components focused on single responsibility
+- Use custom hooks for shared stateful logic

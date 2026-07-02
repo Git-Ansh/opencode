@@ -1,0 +1,11 @@
+Use this tool for structured git operations. Prefer this over `bash git ...` for read operations as it returns parsed, structured output.
+
+Available actions:
+- status: Get working tree status (branch, staged, unstaged, untracked files)
+- diff: Get diff statistics and content
+- log: Get recent commit history (default: 20 commits)
+- branch: List branches with tracking info
+- show: Show a specific commit's details
+- stash_list: List stashed changes
+
+The `args` parameter accepts additional git arguments (e.g., a commit hash for `show`, a file path for `diff`).

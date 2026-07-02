@@ -1,0 +1,6 @@
+The user appears to be debugging an issue. Focus on:
+- Identifying root causes, not just symptoms
+- Suggesting diagnostic steps before fixes
+- Checking error messages, stack traces, and logs carefully
+- Considering edge cases and race conditions
+- Verifying fixes don't introduce regressions
