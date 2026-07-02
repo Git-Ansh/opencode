@@ -295,6 +295,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               )
               save()
             }
+
           })
         },
         toggleFavorite(model: { providerID: string; modelID: string }) {

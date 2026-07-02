@@ -28,6 +28,14 @@ import { LspTool } from "./lsp"
 import { Truncate } from "./truncation"
 
 import { ApplyPatchTool } from "./apply_patch"
+import { GitTool } from "./git"
+import { TestTool } from "./test"
+import { LintTool } from "./lint"
+import { OrchestrateTool } from "./orchestrate"
+import { DelegateTool, DelegationReadTool, DelegationListTool } from "./delegate"
+import { MemorySaveTool, MemoryReadTool, MemoryListTool } from "./memory"
+import { PtySpawnTool, PtyReadTool, PtyWriteTool, PtyKillTool, PtyListTool } from "./pty"
+import { PlanProposeTool } from "./plan-propose"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
 
@@ -112,11 +120,23 @@ export namespace ToolRegistry {
       TaskTool,
       WebFetchTool,
       TodoWriteTool,
-      // TodoReadTool,
+      TodoReadTool,
       WebSearchTool,
       CodeSearchTool,
       SkillTool,
       ApplyPatchTool,
+      GitTool,
+      TestTool,
+      LintTool,
+      OrchestrateTool,
+      DelegateTool,
+      DelegationReadTool,
+      DelegationListTool,
+      MemorySaveTool,
+      MemoryReadTool,
+      MemoryListTool,
+      PlanProposeTool,
+      ...(Flag.OPENCODE_EXPERIMENTAL_PTY ? [PtySpawnTool, PtyReadTool, PtyWriteTool, PtyKillTool, PtyListTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),

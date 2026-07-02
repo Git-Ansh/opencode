@@ -18,6 +18,7 @@ import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { Plugin } from "../plugin"
+import { Todo } from "./todo"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
@@ -37,6 +38,8 @@ import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/util/error"
 import { fn } from "@/util/fn"
 import { SessionProcessor } from "./processor"
+import { ContextPruning } from "./context-pruning"
+import { ProjectMemory } from "./project-memory"
 import { TaskTool } from "@/tool/task"
 import { Tool } from "@/tool/tool"
 import { PermissionNext } from "@/permission/next"
@@ -264,6 +267,19 @@ export namespace SessionPrompt {
     match.abort.abort()
     delete s[sessionID]
     SessionStatus.set(sessionID, { type: "idle" })
+
+    // Also cancel all child sessions (sub-agents)
+    Session.children(sessionID).then((children) => {
+      for (const child of children) {
+        const childMatch = s[child.id]
+        if (childMatch) {
+          log.info("cancel child", { sessionID: child.id })
+          childMatch.abort.abort()
+          delete s[child.id]
+          SessionStatus.set(child.id, { type: "idle" })
+        }
+      }
+    }).catch(() => {})
     return
   }
 
@@ -650,10 +666,70 @@ export namespace SessionPrompt {
 
       // Build system prompt, adding structured output instruction if needed
       const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+
+      // Adaptive prompts: inject project-type and task-mode specific instructions
+      const recentTexts = msgs
+        .slice(-6)
+        .flatMap((m) => m.parts.filter((p) => p.type === "text").map((p) => (p as any).text ?? ""))
+      const adaptivePrompts = await SystemPrompt.adaptive(recentTexts)
+      system.push(...adaptivePrompts)
+
+      // Context injection: git diff, status, etc.
+      const injections = await SystemPrompt.contextInjection()
+      system.push(...injections)
+
+      // Workspace awareness: modified files, test results, build status
+      const workspace = SystemPrompt.workspace(sessionID)
+      system.push(...workspace)
+
+      // Project memory injection (skip for non-git projects where worktree="/")
+      if (Instance.worktree !== "/") {
+        try {
+          const recentQuery = recentTexts.join(" ").slice(0, 500)
+          const memories = await ProjectMemory.search(recentQuery)
+          if (memories.length > 0) {
+            const memoryContent = memories.map((m) => m.content).join("\n---\n")
+            system.push(
+              `<project_memory>\nRelevant project memories (from .opencode/memory/):\n${memoryContent}\n</project_memory>`,
+            )
+          }
+        } catch {
+          // silently ignore memory failures
+        }
+      }
+
+      // Todo awareness: inject current todos so model knows to update them
+      const todos = Todo.get(sessionID)
+      if (todos.length > 0) {
+        const completed = todos.filter(t => t.status === "completed").length
+        const inProgress = todos.filter(t => t.status === "in_progress").length
+        const pending = todos.filter(t => t.status === "pending").length
+        const todoLines = todos.map((t, i) => {
+          const mark = t.status === "completed" ? "x" : t.status === "in_progress" ? "*" : t.status === "cancelled" ? "-" : " "
+          return `  [${mark}] ${t.content}`
+        })
+        system.push([
+          `<current_todos progress="${completed}/${todos.length}" in_progress="${inProgress}" pending="${pending}">`,
+          ...todoLines,
+          `</current_todos>`,
+          ``,
+          `CRITICAL RULE — TODOWRITE UPDATES:`,
+          `The todo list above is displayed to the user in real-time. You MUST call the todowrite tool to update task statuses:`,
+          `1. BEFORE starting a task: mark it "in_progress"`,
+          `2. AFTER completing a task: mark it "completed" and mark the next one "in_progress"`,
+          `3. Call todowrite IMMEDIATELY — do NOT batch updates or wait until the end`,
+          `4. Every tool call you make should be followed by a todowrite call if it completes or starts a task`,
+          `If you fail to update the todo list, the user will see stale progress and think the system is broken.`,
+        ].join("\n"))
+      }
+
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
+
+      // Ephemeral context pruning
+      const prunedMsgs = ContextPruning.apply(msgs)
 
       const result = await processor.process({
         user: lastUser,
@@ -662,7 +738,7 @@ export namespace SessionPrompt {
         sessionID,
         system,
         messages: [
-          ...MessageV2.toModelMessages(msgs, model),
+          ...MessageV2.toModelMessages(prunedMsgs, model),
           ...(isLastStep
             ? [
                 {
@@ -803,6 +879,16 @@ export namespace SessionPrompt {
             },
           )
           const result = await item.execute(args, ctx)
+          // Inject todo reminder after action tools that complete work
+          const ACTION_TOOLS = ["bash", "write", "edit", "apply_patch", "git", "test"]
+          if (ACTION_TOOLS.includes(item.id) && result.output) {
+            const todos = Todo.get(ctx.sessionID)
+            const pending = todos.filter(t => t.status === "pending" || t.status === "in_progress")
+            if (pending.length > 0) {
+              const completed = todos.filter(t => t.status === "completed").length
+              result.output += `\n\n[TODO REMINDER: ${completed}/${todos.length} tasks done. Call todowrite NOW to update task statuses before continuing.]`
+            }
+          }
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({

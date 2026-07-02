@@ -86,6 +86,7 @@ export namespace Snapshot {
   export type Patch = z.infer<typeof Patch>
 
   export async function patch(hash: string): Promise<Patch> {
+    if (Instance.project.vcs !== "git") return { hash, files: [] }
     const git = gitdir()
     await add(git)
     const result =
@@ -113,6 +114,7 @@ export namespace Snapshot {
   }
 
   export async function restore(snapshot: string) {
+    if (Instance.project.vcs !== "git") return
     log.info("restore", { commit: snapshot })
     const git = gitdir()
     const result =
@@ -132,6 +134,7 @@ export namespace Snapshot {
   }
 
   export async function revert(patches: Patch[]) {
+    if (Instance.project.vcs !== "git") return
     const files = new Set<string>()
     const git = gitdir()
     for (const item of patches) {
@@ -165,6 +168,7 @@ export namespace Snapshot {
   }
 
   export async function diff(hash: string) {
+    if (Instance.project.vcs !== "git") return ""
     const git = gitdir()
     await add(git)
     const result =
@@ -200,6 +204,7 @@ export namespace Snapshot {
     })
   export type FileDiff = z.infer<typeof FileDiff>
   export async function diffFull(from: string, to: string): Promise<FileDiff[]> {
+    if (Instance.project.vcs !== "git") return []
     const git = gitdir()
     const result: FileDiff[] = []
     const status = new Map<string, "added" | "deleted" | "modified">()

@@ -1,0 +1,7 @@
+You are working in a TypeScript project. Key conventions:
+- Use strict TypeScript types, avoid `any`
+- Prefer `const` assertions and template literal types where appropriate
+- Use Zod for runtime validation when needed
+- Follow existing import patterns (path aliases with @/)
+- Use async/await over .then() chains
+- Prefer early returns over nested conditionals

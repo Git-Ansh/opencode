@@ -1,0 +1,120 @@
+import fs from "fs/promises"
+import path from "path"
+import { Instance } from "../project/instance"
+import { git } from "../util/git"
+import { Log } from "../util/log"
+
+export namespace ContextInjection {
+  const log = Log.create({ service: "context.injection" })
+  const MAX_TOKENS = 4000
+  const CHARS_PER_TOKEN = 4
+
+  interface Source {
+    type: string
+    content: string
+    priority: number
+  }
+
+  export async function gather(): Promise<string[]> {
+    // Non-git projects have worktree="/", avoid running git commands with cwd: "/"
+    if (Instance.project.vcs !== "git") return []
+
+    const sources: Source[] = []
+    const dir = Instance.directory
+
+    // Git diff summary
+    try {
+      const result = await git(["diff", "--stat", "HEAD"], { cwd: dir })
+      if (result.exitCode === 0) {
+        const text = result.text().trim()
+        if (text) {
+          sources.push({ type: "git_diff", content: text, priority: 1 })
+        }
+      }
+    } catch {}
+
+    // Git status
+    try {
+      const result = await git(["status", "--short"], { cwd: dir })
+      if (result.exitCode === 0) {
+        const text = result.text().trim()
+        if (text) {
+          sources.push({ type: "git_status", content: text, priority: 2 })
+        }
+      }
+    } catch {}
+
+    // package.json summary
+    try {
+      const pkg = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf-8"))
+      const scripts = Object.keys(pkg.scripts ?? {}).join(", ")
+      const deps = Object.keys(pkg.dependencies ?? {}).slice(0, 15).join(", ")
+      const devDeps = Object.keys(pkg.devDependencies ?? {}).slice(0, 10).join(", ")
+      const lines = [`name: ${pkg.name ?? "unknown"}`]
+      if (scripts) lines.push(`scripts: ${scripts}`)
+      if (deps) lines.push(`dependencies: ${deps}`)
+      if (devDeps) lines.push(`devDependencies: ${devDeps}`)
+      sources.push({ type: "package_json", content: lines.join("\n"), priority: 3 })
+    } catch {}
+
+    // README.md first 500 chars
+    try {
+      const readme = await fs.readFile(path.join(dir, "README.md"), "utf-8")
+      const text = readme.slice(0, 500).trim()
+      if (text) {
+        sources.push({ type: "readme", content: text + (readme.length > 500 ? "\n[truncated]" : ""), priority: 4 })
+      }
+    } catch {}
+
+    // Makefile / Justfile targets
+    try {
+      let makeContent: string | undefined
+      for (const name of ["Makefile", "justfile", "Justfile"]) {
+        try {
+          makeContent = await fs.readFile(path.join(dir, name), "utf-8")
+          break
+        } catch {}
+      }
+      if (makeContent) {
+        const targets = makeContent
+          .split("\n")
+          .filter((l) => /^[a-zA-Z_][\w-]*\s*:/.test(l))
+          .map((l) => l.split(":")[0].trim())
+          .join(", ")
+        if (targets) {
+          sources.push({ type: "makefile_targets", content: targets, priority: 5 })
+        }
+      }
+    } catch {}
+
+    // .env.example expected vars
+    try {
+      const envExample = await fs.readFile(path.join(dir, ".env.example"), "utf-8")
+      const vars = envExample
+        .split("\n")
+        .filter((l) => /^[A-Z_]+=/.test(l.trim()))
+        .map((l) => l.trim().split("=")[0])
+        .join(", ")
+      if (vars) {
+        sources.push({ type: "env_example", content: `Expected env vars: ${vars}`, priority: 6 })
+      }
+    } catch {}
+
+    sources.sort((a, b) => a.priority - b.priority)
+
+    const maxChars = MAX_TOKENS * CHARS_PER_TOKEN
+    let total = 0
+    const result: string[] = []
+
+    for (const source of sources) {
+      const remaining = maxChars - total
+      if (remaining <= 0) break
+      const content =
+        source.content.length > remaining ? source.content.slice(0, remaining) + "\n[truncated]" : source.content
+      result.push(`<context-injection type="${source.type}">\n${content}\n</context-injection>`)
+      total += content.length
+    }
+
+    return result
+  }
+}

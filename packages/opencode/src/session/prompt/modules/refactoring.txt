@@ -1,0 +1,6 @@
+The user appears to be refactoring code. Focus on:
+- Maintaining existing behavior (no functional changes)
+- Improving readability and maintainability
+- Following existing project patterns and conventions
+- Making incremental, reviewable changes
+- Ensuring tests still pass after changes

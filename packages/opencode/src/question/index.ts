@@ -12,6 +12,8 @@ export namespace Question {
     .object({
       label: z.string().describe("Display text (1-5 words, concise)"),
       description: z.string().describe("Explanation of choice"),
+      detail: z.string().optional().describe("Extended detail text shown on expand"),
+      category: z.string().optional().describe("Category for grouping options"),
     })
     .meta({
       ref: "QuestionOption",

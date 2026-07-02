@@ -1147,6 +1147,14 @@ export namespace Config {
             .describe("Token buffer for compaction. Leaves enough window to avoid overflow during compaction."),
         })
         .optional(),
+      notifications: z
+        .object({
+          enabled: z.boolean().optional().describe("Enable desktop notifications (default: true)"),
+          on_complete: z.boolean().optional().describe("Notify when a task completes (default: true)"),
+          on_permission: z.boolean().optional().describe("Notify when permission is needed (default: true)"),
+          on_error: z.boolean().optional().describe("Notify on session errors (default: true)"),
+        })
+        .optional(),
       experimental: z
         .object({
           disable_paste_summary: z.boolean().optional(),

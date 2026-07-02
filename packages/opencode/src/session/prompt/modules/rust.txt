@@ -1,0 +1,6 @@
+You are working in a Rust project. Key conventions:
+- Follow Rust naming conventions (snake_case for functions/variables, PascalCase for types)
+- Prefer Result/Option over panicking
+- Use iterators and closures idiomatically
+- Follow ownership and borrowing best practices
+- Use cargo fmt and clippy conventions

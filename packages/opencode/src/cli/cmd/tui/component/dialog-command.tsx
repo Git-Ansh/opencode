@@ -31,6 +31,7 @@ export type CommandOption = DialogSelectOption<string> & {
 function init() {
   const [registrations, setRegistrations] = createSignal<Accessor<CommandOption[]>[]>([])
   const [suspendCount, setSuspendCount] = createSignal(0)
+  const [recentCommands, setRecentCommands] = createSignal<string[]>([])
   const dialog = useDialog()
   const keybind = useKeybind()
 
@@ -55,6 +56,18 @@ function init() {
         category: "Suggested",
       })),
   )
+  const recentOptions = createMemo(() => {
+    const recent = recentCommands()
+    return recent
+      .map((val) => visibleOptions().find((o) => o.value === val))
+      .filter((o): o is CommandOption => !!o)
+      .slice(0, 10)
+      .map((option) => ({
+        ...option,
+        value: `recent:${option.value}`,
+        category: "Recent",
+      }))
+  })
   const suspended = () => suspendCount() > 0
 
   useKeyboard((evt) => {
@@ -75,6 +88,10 @@ function init() {
       for (const option of entries()) {
         if (option.value === name) {
           if (!isEnabled(option)) return
+          setRecentCommands((prev) => {
+            const filtered = prev.filter((v) => v !== name)
+            return [name, ...filtered].slice(0, 10)
+          })
           option.onSelect?.(dialog)
           return
         }
@@ -97,7 +114,7 @@ function init() {
     },
     suspended,
     show() {
-      dialog.replace(() => <DialogCommand options={visibleOptions()} suggestedOptions={suggestedOptions()} />)
+      dialog.replace(() => <DialogCommand options={visibleOptions()} suggestedOptions={suggestedOptions()} recentOptions={recentOptions()} />)
     },
     register(cb: () => CommandOption[]) {
       const results = createMemo(cb)
@@ -137,11 +154,11 @@ export function CommandProvider(props: ParentProps) {
   return <ctx.Provider value={value}>{props.children}</ctx.Provider>
 }
 
-function DialogCommand(props: { options: CommandOption[]; suggestedOptions: CommandOption[] }) {
+function DialogCommand(props: { options: CommandOption[]; suggestedOptions: CommandOption[]; recentOptions: CommandOption[] }) {
   let ref: DialogSelectRef<string>
   const list = () => {
     if (ref?.filter) return props.options
-    return [...props.suggestedOptions, ...props.options]
+    return [...props.suggestedOptions, ...props.recentOptions, ...props.options]
   }
   return <DialogSelect ref={(r) => (ref = r)} title="Commands" options={list()} />
 }

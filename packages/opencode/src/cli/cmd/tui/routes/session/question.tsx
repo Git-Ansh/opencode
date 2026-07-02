@@ -20,6 +20,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
   const tabs = createMemo(() => (single() ? 1 : questions().length + 1)) // questions + confirm tab (no confirm for single select)
   const [tabHover, setTabHover] = createSignal<number | "confirm" | null>(null)
+  const [expandedDetail, setExpandedDetail] = createSignal<number | null>(null)
   const [store, setStore] = createStore({
     tab: 0,
     answers: [] as QuestionAnswer[],
@@ -247,6 +248,31 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
         evt.preventDefault()
         reject()
       }
+
+      // ? key: toggle detail expansion for current option
+      if (evt.name === "?" || (evt.shift && evt.name === "/")) {
+        evt.preventDefault()
+        const opt = opts[store.selected]
+        if (opt?.detail) {
+          setExpandedDetail((prev) => (prev === store.selected ? null : store.selected))
+        }
+      }
+
+      // m key: "Tell me more" — sends elaboration marker so model explains before re-asking
+      if (evt.name === "m") {
+        evt.preventDefault()
+        sdk.client.question.reply({
+          requestID: props.request.id,
+          answers: questions().map(() => ["[ELABORATE]"]),
+        })
+      }
+
+      // space: toggle in multi-select mode
+      if (evt.name === "space" && multi()) {
+        evt.preventDefault()
+        const opt = opts[store.selected]
+        if (opt) toggle(opt.label)
+      }
     }
   })
 
@@ -324,32 +350,57 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
                 {(opt, i) => {
                   const active = () => i() === store.selected
                   const picked = () => store.answers[store.tab]?.includes(opt.label) ?? false
+                  // Show category header if this is first item or different from previous
+                  const showCategory = () => {
+                    const cat = (opt as any).category
+                    if (!cat) return null
+                    const prev = options()[i() - 1]
+                    if (prev && (prev as any).category === cat) return null
+                    return cat as string
+                  }
                   return (
-                    <box
-                      onMouseOver={() => moveTo(i())}
-                      onMouseDown={() => moveTo(i())}
-                      onMouseUp={() => selectOption()}
-                    >
-                      <box flexDirection="row">
-                        <box backgroundColor={active() ? theme.backgroundElement : undefined} paddingRight={1}>
-                          <text fg={active() ? tint(theme.textMuted, theme.secondary, 0.6) : theme.textMuted}>
-                            {`${i() + 1}.`}
-                          </text>
+                    <>
+                      <Show when={showCategory()}>
+                        <box paddingTop={i() > 0 ? 1 : 0} paddingBottom={0}>
+                          <text fg={theme.accent} bold>{showCategory()}</text>
                         </box>
-                        <box backgroundColor={active() ? theme.backgroundElement : undefined}>
-                          <text fg={active() ? theme.secondary : picked() ? theme.success : theme.text}>
-                            {multi() ? `[${picked() ? "✓" : " "}] ${opt.label}` : opt.label}
-                          </text>
+                      </Show>
+                      <box
+                        onMouseOver={() => moveTo(i())}
+                        onMouseDown={() => moveTo(i())}
+                        onMouseUp={() => selectOption()}
+                      >
+                        <box flexDirection="row">
+                          <box backgroundColor={active() ? theme.backgroundElement : undefined} paddingRight={1}>
+                            <text fg={active() ? tint(theme.textMuted, theme.secondary, 0.6) : theme.textMuted}>
+                              {`${i() + 1}.`}
+                            </text>
+                          </box>
+                          <box backgroundColor={active() ? theme.backgroundElement : undefined}>
+                            <text fg={active() ? theme.secondary : picked() ? theme.success : theme.text}>
+                              {multi() ? `[${picked() ? "✓" : " "}] ${opt.label}` : opt.label}
+                            </text>
+                          </box>
+                          <Show when={!multi()}>
+                            <text fg={theme.success}>{picked() ? "✓" : ""}</text>
+                          </Show>
                         </box>
-                        <Show when={!multi()}>
-                          <text fg={theme.success}>{picked() ? "✓" : ""}</text>
+
+                        <box paddingLeft={3}>
+                          <text fg={theme.textMuted}>{opt.description}</text>
+                        </box>
+                        <Show when={expandedDetail() === i() && (opt as any).detail}>
+                          <box paddingLeft={3} paddingTop={1} paddingBottom={1} backgroundColor={theme.backgroundElement}>
+                            <text fg={theme.text} wrapMode="word">{(opt as any).detail}</text>
+                          </box>
+                        </Show>
+                        <Show when={active() && (opt as any).detail && expandedDetail() !== i()}>
+                          <box paddingLeft={3}>
+                            <text fg={theme.textMuted}><i>Press ? for details</i></text>
+                          </box>
                         </Show>
                       </box>
-
-                      <box paddingLeft={3}>
-                        <text fg={theme.textMuted}>{opt.description}</text>
-                      </box>
-                    </box>
+                    </>
                   )
                 }}
               </For>
@@ -459,6 +510,16 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
           <text fg={theme.text}>
             esc <span style={{ fg: theme.textMuted }}>dismiss</span>
           </text>
+          <Show when={!confirm()}>
+            <text fg={theme.text}>
+              m <span style={{ fg: theme.textMuted }}>tell me more</span>
+            </text>
+          </Show>
+          <Show when={!confirm() && options().some((o: any) => o.detail)}>
+            <text fg={theme.text}>
+              ? <span style={{ fg: theme.textMuted }}>details</span>
+            </text>
+          </Show>
         </box>
       </box>
     </box>

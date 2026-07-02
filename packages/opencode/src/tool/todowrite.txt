@@ -152,11 +152,14 @@ The assistant did not use the todo list because this is a single command executi
    - cancelled: Task no longer needed
 
 2. **Task Management**:
-   - Update task status in real-time as you work
+   - CRITICAL: You MUST call this tool to update task status after EVERY step you complete. Do not wait — update immediately.
+   - After finishing a bash command, edit, or any action that completes a task: call this tool right away to mark it "completed"
+   - Before starting work on the next task: call this tool to mark it "in_progress"
    - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
    - Only have ONE task in_progress at any time
    - Complete current tasks before starting new ones
    - Cancel tasks that become irrelevant
+   - The user sees the todo list in real-time. If you don't update it, they think nothing is happening.
 
 3. **Task Breakdown**:
    - Create specific, actionable items

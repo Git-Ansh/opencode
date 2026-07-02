@@ -7,6 +7,8 @@ the status of the current task list. You should make use of this tool as often a
 - After completing tasks to update your understanding of remaining work
 - After every few messages to ensure you're on track
 
+IMPORTANT: After reading the todo list, if you see tasks that should be marked completed or in_progress based on work you've already done, immediately call the todowrite tool to update their status. The user sees the todo list in real-time in the sidebar — stale statuses look broken.
+
 Usage:
 - This tool takes in no parameters. So leave the input blank or empty. DO NOT include a dummy object, placeholder string or a key like "input" or "empty". LEAVE IT BLANK.
 - Returns a list of todo items with their status, priority, and content

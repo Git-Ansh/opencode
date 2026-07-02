@@ -1,0 +1,6 @@
+You are working with Next.js. Key conventions:
+- Use App Router patterns (app/ directory structure)
+- Prefer Server Components by default, use 'use client' only when needed
+- Use Next.js built-in optimization (Image, Link, Font)
+- Follow file-based routing conventions
+- Use server actions for mutations when appropriate

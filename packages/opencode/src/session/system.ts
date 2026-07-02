@@ -10,6 +10,9 @@ import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_CODEX from "./prompt/codex_header.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
 import type { Provider } from "@/provider/provider"
+import { AdaptivePrompt } from "./prompt/adaptive"
+import { ContextInjection } from "./context-injection"
+import { Workspace } from "./workspace"
 
 export namespace SystemPrompt {
   export function instructions() {
@@ -50,5 +53,18 @@ export namespace SystemPrompt {
         `</directories>`,
       ].join("\n"),
     ]
+  }
+
+  export async function adaptive(recentMessages: string[]) {
+    return AdaptivePrompt.compose(recentMessages)
+  }
+
+  export async function contextInjection() {
+    return ContextInjection.gather()
+  }
+
+  export function workspace(sessionID: string): string[] {
+    const summary = Workspace.summary(sessionID)
+    return summary ? [summary] : []
   }
 }

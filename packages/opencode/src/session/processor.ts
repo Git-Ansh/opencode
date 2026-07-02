@@ -15,6 +15,8 @@ import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
+import { Workspace } from "./workspace"
+import { SecretRedaction } from "@/security/redact"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -185,7 +187,7 @@ export namespace SessionProcessor {
                       state: {
                         status: "completed",
                         input: value.input ?? match.state.input,
-                        output: value.output.output,
+                        output: SecretRedaction.redactOutput(value.output.output ?? ""),
                         metadata: value.output.metadata,
                         title: value.output.title,
                         time: {
@@ -195,6 +197,15 @@ export namespace SessionProcessor {
                         attachments: value.output.attachments,
                       },
                     })
+
+                    // Track workspace state from tool results
+                    Workspace.parseToolOutput(input.sessionID, match.tool, value.output.output ?? "")
+                    if (match.tool === "write" || match.tool === "edit" || match.tool === "apply_patch") {
+                      const filepath = typeof match.state.input === "object" && match.state.input
+                        ? (match.state.input as any).file_path ?? (match.state.input as any).path ?? ""
+                        : ""
+                      if (filepath) Workspace.trackFile(input.sessionID, filepath)
+                    }
 
                     delete toolcalls[value.toolCallId]
                   }

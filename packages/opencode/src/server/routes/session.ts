@@ -6,6 +6,8 @@ import { Session } from "../../session"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionPrompt } from "../../session/prompt"
 import { SessionCompaction } from "../../session/compaction"
+import { DCP } from "../../session/dcp"
+import { Provider } from "../../provider/provider"
 import { SessionRevert } from "../../session/revert"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
@@ -16,6 +18,7 @@ import { Log } from "../../util/log"
 import { PermissionNext } from "@/permission/next"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { Identifier } from "../../id/id"
 
 const log = Log.create({ service: "server" })
 
@@ -537,6 +540,151 @@ export const SessionRoutes = lazy(() =>
           auto: body.auto,
         })
         await SessionPrompt.loop({ sessionID })
+        return c.json(true)
+      },
+    )
+    .post(
+      "/:sessionID/dcp",
+      describeRoute({
+        summary: "Dynamic context pruning",
+        description: "Prune context to fit a target model's context window while preserving the most relevant information.",
+        operationId: "session.dcp",
+        responses: {
+          200: {
+            description: "Pruning stats",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    before: z.number(),
+                    after: z.number(),
+                    pruned: z.number(),
+                    kept: z.number(),
+                    percentage: z.number(),
+                  }),
+                ),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: z.string().meta({ description: "Session ID" }),
+        }),
+      ),
+      validator(
+        "json",
+        z.object({
+          providerID: z.string(),
+          modelID: z.string(),
+        }),
+      ),
+      async (c) => {
+        const sessionID = c.req.valid("param").sessionID
+        const body = c.req.valid("json")
+        try {
+          await Session.get(sessionID)
+        } catch {
+          return c.json({ error: "Session not found" }, 404)
+        }
+        let model: Awaited<ReturnType<typeof Provider.getModel>>
+        try {
+          model = await Provider.getModel(body.providerID, body.modelID)
+        } catch {
+          return c.json({ error: "Model not found" }, 400)
+        }
+        const stats = await DCP.adapt({ sessionID, model })
+        return c.json(stats)
+      },
+    )
+    .post(
+      "/:sessionID/plan/decision",
+      describeRoute({
+        summary: "Submit a plan review decision",
+        description:
+          "Called by the TUI Plan Review pane. Accept switches to the build agent and starts execution. Revise sends per-step rejection comments back to the plan agent for another pass.",
+        operationId: "session.planDecision",
+        responses: {
+          200: { description: "OK", content: { "application/json": { schema: resolver(z.boolean()) } } },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: z.string() })),
+      validator(
+        "json",
+        z.object({
+          decision: z.enum(["accept", "revise"]),
+          comments: z
+            .array(
+              z.object({
+                stepIndex: z.number(),
+                stepText: z.string(),
+                comment: z.string().optional(),
+              }),
+            )
+            .optional(),
+        }),
+      ),
+      async (c) => {
+        const sessionID = c.req.valid("param").sessionID
+        const body = c.req.valid("json")
+        try {
+          await Session.get(sessionID)
+        } catch {
+          return c.json({ error: "Session not found" }, 404)
+        }
+
+        // Find the most recent user model to use for the next turn
+        let model: { providerID: string; modelID: string } | undefined
+        for await (const item of MessageV2.stream(sessionID)) {
+          if (item.info.role === "user" && item.info.model) {
+            model = item.info.model
+            break
+          }
+        }
+        if (!model) model = await Provider.defaultModel()
+
+        const targetAgent = body.decision === "accept" ? "build" : "plan"
+
+        let text: string
+        if (body.decision === "accept") {
+          text = "Plan approved by the user. Switching to the build agent. Execute the plan now."
+        } else {
+          const lines = (body.comments ?? [])
+            .filter((c) => c.comment && c.comment.trim().length > 0)
+            .map((c) => `- Step ${c.stepIndex + 1} ("${c.stepText}"): ${c.comment}`)
+          text =
+            lines.length > 0
+              ? `The user rejected parts of the plan with these comments:\n${lines.join(
+                  "\n",
+                )}\n\nRevise the plan and call plan_propose again with the updated steps.`
+              : "The user rejected the plan. Revise it and call plan_propose again."
+        }
+
+        const userMsg: MessageV2.User = {
+          id: Identifier.ascending("message"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: targetAgent,
+          model,
+        }
+        await Session.updateMessage(userMsg)
+        await Session.updatePart({
+          id: Identifier.ascending("part"),
+          messageID: userMsg.id,
+          sessionID,
+          type: "text",
+          text,
+          synthetic: true,
+        } satisfies MessageV2.TextPart)
+
+        // Fire-and-forget: the agent loop can run for minutes, so don't keep
+        // the HTTP client blocked. The TUI streams updates over events anyway.
+        void SessionPrompt.loop({ sessionID }).catch((e) => log.error("plan decision loop", { error: String(e) }))
         return c.json(true)
       },
     )

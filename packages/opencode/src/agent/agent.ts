@@ -13,6 +13,11 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_REVIEWER from "./prompt/reviewer.txt"
+import PROMPT_RESEARCHER from "./prompt/researcher.txt"
+import PROMPT_TESTER from "./prompt/tester.txt"
+import PROMPT_REFACTOR from "./prompt/refactor.txt"
+import PROMPT_BRAINSTORM from "./prompt/brainstorm.txt"
 import { PermissionNext } from "@/permission/next"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@/global"
@@ -199,6 +204,128 @@ export namespace Agent {
           user,
         ),
         prompt: PROMPT_SUMMARY,
+      },
+      reviewer: {
+        name: "reviewer",
+        description: "Reviews code changes for bugs, security issues, and style. Read-only access.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            grep: "allow",
+            glob: "allow",
+            read: "allow",
+            bash: "allow",
+            webfetch: "allow",
+            external_directory: {
+              "*": "ask",
+              ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+            },
+          }),
+          user,
+        ),
+        prompt: PROMPT_REVIEWER,
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
+      researcher: {
+        name: "researcher",
+        description: "Deep-dives into docs, APIs, and patterns. Read + web access.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            grep: "allow",
+            glob: "allow",
+            read: "allow",
+            bash: "allow",
+            webfetch: "allow",
+            websearch: "allow",
+            codesearch: "allow",
+            external_directory: {
+              "*": "ask",
+              ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+            },
+          }),
+          user,
+        ),
+        prompt: PROMPT_RESEARCHER,
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
+      tester: {
+        name: "tester",
+        description: "Writes and runs tests. Full tool access.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            question: "deny",
+            todoread: "deny",
+            todowrite: "deny",
+          }),
+          user,
+        ),
+        prompt: PROMPT_TESTER,
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
+      refactor: {
+        name: "refactor",
+        description: "Analyzes and suggests refactoring. Read + edit access.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            grep: "allow",
+            glob: "allow",
+            read: "allow",
+            edit: "allow",
+            write: "allow",
+            bash: "allow",
+            external_directory: {
+              "*": "ask",
+              ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+            },
+          }),
+          user,
+        ),
+        prompt: PROMPT_REFACTOR,
+        options: {},
+        mode: "subagent",
+        native: true,
+      },
+      brainstorm: {
+        name: "brainstorm",
+        description:
+          "Collaborative brainstorming agent. Asks clarifying questions and explores options before planning. Use for complex tasks that need thought before action.",
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+            question: "allow",
+            task: "allow",
+            grep: "allow",
+            glob: "allow",
+            read: "allow",
+            bash: "allow",
+            webfetch: "allow",
+            websearch: "allow",
+            todowrite: "allow",
+            todoread: "allow",
+            external_directory: {
+              "*": "ask",
+              ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+            },
+          }),
+          user,
+        ),
+        prompt: PROMPT_BRAINSTORM,
+        options: {},
+        mode: "all",
+        native: true,
       },
     }
 

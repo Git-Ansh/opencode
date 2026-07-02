@@ -37,6 +37,42 @@ interface McpSearchResponse {
   }
 }
 
+function addCitations(text: string): string {
+  // Extract sources from Exa response blocks (Title: ... URL: ... patterns)
+  const sources: { title: string; url: string }[] = []
+  const urlPattern = /(?:Title:\s*(.+?)\s*\n\s*URL:\s*(https?:\/\/\S+))|(?:(https?:\/\/\S+))/g
+  let match: RegExpExecArray | null
+  const seen = new Set<string>()
+
+  // First pass: collect unique sources
+  const textCopy = text
+  while ((match = urlPattern.exec(textCopy)) !== null) {
+    const title = match[1] || ""
+    const url = match[2] || match[3]
+    if (url && !seen.has(url)) {
+      seen.add(url)
+      sources.push({ title: title.trim() || new URL(url).hostname, url })
+    }
+  }
+
+  if (sources.length === 0) return text
+
+  // Second pass: add inline citation markers next to URLs
+  let cited = text
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i]
+    // Add [N] after first occurrence of each URL that doesn't already have a citation
+    const escaped = src.url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    cited = cited.replace(new RegExp(`(${escaped})(?!\\s*\\[\\d+\\])`), `$1 [${i + 1}]`)
+  }
+
+  // Append sources section
+  const sourcesSection = sources.map((s, i) => `[${i + 1}] ${s.title} - ${s.url}`).join("\n")
+  cited += `\n\nSources:\n${sourcesSection}`
+
+  return cited
+}
+
 export const WebSearchTool = Tool.define("websearch", async () => {
   return {
     get description() {
@@ -122,8 +158,10 @@ export const WebSearchTool = Tool.define("websearch", async () => {
           if (line.startsWith("data: ")) {
             const data: McpSearchResponse = JSON.parse(line.substring(6))
             if (data.result && data.result.content && data.result.content.length > 0) {
+              const rawText = data.result.content[0].text
+              const cited = addCitations(rawText)
               return {
-                output: data.result.content[0].text,
+                output: cited,
                 title: `Web search: ${params.query}`,
                 metadata: {},
               }

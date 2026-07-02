@@ -96,6 +96,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       if (timer) clearTimeout(timer)
     })
 
-    return { client: sdk, event: emitter, url: props.url }
+    // `fetch` is the worker-aware fetch shim (when running in worker mode);
+    // the global fetch can't resolve the fake `http://opencode.internal` URL.
+    // Custom routes (not in the typed SDK) must use this fetch, not globalThis.fetch.
+    return { client: sdk, event: emitter, url: props.url, fetch: props.fetch ?? globalThis.fetch }
   },
 })

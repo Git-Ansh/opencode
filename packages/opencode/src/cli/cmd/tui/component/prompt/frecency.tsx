@@ -81,9 +81,26 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
       }
     }
 
+    // Command frecency tracking (stored with "cmd:" prefix)
+    function updateCommandFrecency(command: string) {
+      const key = `cmd:${command}`
+      const newEntry = {
+        frequency: (store.data[key]?.frequency || 0) + 1,
+        lastOpen: Date.now(),
+      }
+      setStore("data", key, newEntry)
+      appendFile(frecencyPath, JSON.stringify({ path: key, ...newEntry }) + "\n").catch(() => {})
+    }
+
+    function getCommandFrecency(command: string): number {
+      return calculateFrecency(store.data[`cmd:${command}`])
+    }
+
     return {
       getFrecency: (filePath: string) => calculateFrecency(store.data[path.resolve(process.cwd(), filePath)]),
       updateFrecency,
+      getCommandFrecency,
+      updateCommandFrecency,
       data: () => store.data,
     }
   },
