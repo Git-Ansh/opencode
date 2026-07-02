@@ -51,6 +51,41 @@ export function webSearchModelName(extra: Tool.Context["extra"]) {
   return (apiID ?? id)?.slice(0, 100)
 }
 
+function addCitations(text: string): string {
+  // Extract sources from search-result text (Title: ... URL: ... patterns, or bare URLs)
+  const sources: { title: string; url: string }[] = []
+  const urlPattern = /(?:Title:\s*(.+?)\s*\n\s*URL:\s*(https?:\/\/\S+))|(?:(https?:\/\/\S+))/g
+  let match: RegExpExecArray | null
+  const seen = new Set<string>()
+
+  // First pass: collect unique sources
+  while ((match = urlPattern.exec(text)) !== null) {
+    const title = match[1] || ""
+    const url = match[2] || match[3]
+    if (url && !seen.has(url)) {
+      seen.add(url)
+      sources.push({ title: title.trim() || new URL(url).hostname, url })
+    }
+  }
+
+  if (sources.length === 0) return text
+
+  // Second pass: add inline citation markers next to URLs
+  let cited = text
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i]
+    // Add [N] after first occurrence of each URL that doesn't already have a citation
+    const escaped = src.url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    cited = cited.replace(new RegExp(`(${escaped})(?!\\s*\\[\\d+\\])`), `$1 [${i + 1}]`)
+  }
+
+  // Append sources section
+  const sourcesSection = sources.map((s, i) => `[${i + 1}] ${s.title} - ${s.url}`).join("\n")
+  cited += `\n\nSources:\n${sourcesSection}`
+
+  return cited
+}
+
 function parallelAuthHeaders() {
   const headers = { "User-Agent": `opencode/${InstallationVersion}` }
   if (!process.env.PARALLEL_API_KEY) return headers
@@ -131,9 +166,10 @@ export const WebSearchTool = Tool.define(
           })
 
           const result = yield* callProvider(http, provider, params, ctx)
+          const cited = result ? addCitations(result) : result
 
           return {
-            output: result ?? "No search results found. Please try a different query.",
+            output: cited ?? "No search results found. Please try a different query.",
             title: `${title}: ${params.query}`,
             metadata: { provider },
           }

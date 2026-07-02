@@ -163,6 +163,22 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  notifications: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable desktop notifications (default: true)",
+      }),
+      on_complete: Schema.optional(Schema.Boolean).annotate({
+        description: "Notify when a task completes (default: true)",
+      }),
+      on_permission: Schema.optional(Schema.Boolean).annotate({
+        description: "Notify when permission is needed (default: true)",
+      }),
+      on_error: Schema.optional(Schema.Boolean).annotate({
+        description: "Notify on session errors (default: true)",
+      }),
+    }),
+  ).annotate({ description: "Desktop notification settings" }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

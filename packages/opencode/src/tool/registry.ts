@@ -29,6 +29,16 @@ import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import { GitTool } from "./git"
+import { TestTool } from "./test"
+import { LintTool } from "./lint"
+import { OrchestrateTool } from "./orchestrate"
+import { DelegateTool, DelegationReadTool, DelegationListTool } from "./delegate"
+import { MemorySaveTool, MemoryReadTool, MemoryListTool } from "./memory"
+import { PtySpawnTool, PtyReadTool, PtyWriteTool, PtyKillTool, PtyListTool } from "./pty"
+import { PlanProposeTool } from "./plan-propose"
+import { Git } from "@/git"
+import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -105,6 +115,22 @@ const layer = Layer.effect(
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const agent = yield* Agent.Service
+    const gittool = yield* GitTool
+    const testtool = yield* TestTool
+    const linttool = yield* LintTool
+    const memorySaveTool = yield* MemorySaveTool
+    const memoryReadTool = yield* MemoryReadTool
+    const memoryListTool = yield* MemoryListTool
+    const orchestrateTool = yield* OrchestrateTool
+    const delegateTool = yield* DelegateTool
+    const delegationReadTool = yield* DelegationReadTool
+    const delegationListTool = yield* DelegationListTool
+    const planProposeTool = yield* PlanProposeTool
+    const ptySpawnTool = yield* PtySpawnTool
+    const ptyReadTool = yield* PtyReadTool
+    const ptyWriteTool = yield* PtyWriteTool
+    const ptyKillTool = yield* PtyKillTool
+    const ptyListTool = yield* PtyListTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -211,6 +237,22 @@ const layer = Layer.effect(
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          git: Tool.init(gittool),
+          test: Tool.init(testtool),
+          lint: Tool.init(linttool),
+          memorySave: Tool.init(memorySaveTool),
+          memoryRead: Tool.init(memoryReadTool),
+          memoryList: Tool.init(memoryListTool),
+          orchestrate: Tool.init(orchestrateTool),
+          delegate: Tool.init(delegateTool),
+          delegationRead: Tool.init(delegationReadTool),
+          delegationList: Tool.init(delegationListTool),
+          planPropose: Tool.init(planProposeTool),
+          ptySpawn: Tool.init(ptySpawnTool),
+          ptyRead: Tool.init(ptyReadTool),
+          ptyWrite: Tool.init(ptyWriteTool),
+          ptyKill: Tool.init(ptyKillTool),
+          ptyList: Tool.init(ptyListTool),
         })
 
         return {
@@ -230,6 +272,18 @@ const layer = Layer.effect(
             tool.search,
             tool.skill,
             tool.patch,
+            tool.git,
+            tool.test,
+            tool.lint,
+            tool.orchestrate,
+            tool.delegate,
+            tool.delegationRead,
+            tool.delegationList,
+            tool.memorySave,
+            tool.memoryRead,
+            tool.memoryList,
+            tool.planPropose,
+            ...(flags.experimentalPty ? [tool.ptySpawn, tool.ptyRead, tool.ptyWrite, tool.ptyKill, tool.ptyList] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],
@@ -390,6 +444,12 @@ function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+const locationServiceMapNode = LayerNode.make({
+  service: LocationServiceMap.Service,
+  layer: locationServiceMapLayer,
+  deps: [],
+})
+
 export const node = LayerNode.make({
   service: Service,
   layer,
@@ -414,6 +474,8 @@ export const node = LayerNode.make({
     RuntimeFlags.node,
     Database.node,
     Ripgrep.node,
+    Git.node,
+    locationServiceMapNode,
   ],
 })
 

@@ -22,12 +22,16 @@ Skip when:
 - `cancelled` - no longer needed
 
 ## Rules
+- CRITICAL: Call this tool to update task status after EVERY step you complete. Do not wait — update immediately.
+- After finishing a bash command, edit, or any action that completes a task: call this tool right away to mark it `completed`
+- Before starting work on the next task: call this tool to mark it `in_progress`
 - Update status in real time; don't batch completions
 - Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.
 - Keep exactly one `in_progress` while work remains
 - If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker
 - Preserve user-provided commands verbatim (flags, args, order)
 - Items should be specific and actionable; break large work into smaller steps
+- The user sees the todo list in real-time. If you don't update it, they think nothing is happening.
 
 ## Examples
 

@@ -69,19 +69,7 @@ $n.Dispose()
     initialized = true
 
     const config = await AppRuntime.runPromise(Config.Service.use((c) => c.get()))
-    // TODO(port): config/config.ts does not define a `notifications` schema
-    // block yet (that's Phase 2's job — see PORT_PLAN.md). Read defensively
-    // until the real schema field exists.
-    const notifConfig = (
-      config as {
-        notifications?: {
-          enabled?: boolean
-          on_complete?: boolean
-          on_permission?: boolean
-          on_error?: boolean
-        }
-      }
-    ).notifications
+    const notifConfig = config.notifications
     if (notifConfig?.enabled === false) return
 
     const subscriptions: Effect.Effect<void, never, EventV2Bridge.Service>[] = []

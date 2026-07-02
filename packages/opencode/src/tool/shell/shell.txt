@@ -19,3 +19,20 @@ ${commandSection}
 - Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.
 - Review all commits included in the PR, not just the latest commit.
 - Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.
+
+# Non-Interactive Shell Rules
+This shell has NO TTY/PTY. Commands that wait for user input will hang and timeout.
+
+ALWAYS use non-interactive flags:
+- `npm init -y` not `npm init`
+- `apt-get install -y` not `apt-get install`
+- `git commit -m "msg"` not `git commit` (opens editor)
+- `DEBIAN_FRONTEND=noninteractive` for apt
+- `yes |` pipe for commands with no -y flag
+- `--no-pager` with git log/diff/show
+- `--no-edit` where available
+- `echo "input" |` to pipe input to interactive commands
+
+NEVER launch: nano, vim, vi, emacs, less, more, top, htop, man
+NEVER use commands that open a pager or text editor
+If you need to create/edit files, use the Write/Edit tools instead

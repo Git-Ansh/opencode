@@ -10,6 +10,8 @@ import { ShareNext } from "@/share/share-next"
 import { Effect, Layer } from "effect"
 import { Config } from "@/config/config"
 import { Service } from "./bootstrap-service"
+import { Notification } from "../notification"
+import { Telemetry } from "../telemetry"
 
 export { Service } from "./bootstrap-service"
 export type { Interface } from "./bootstrap-service"
@@ -43,6 +45,15 @@ const layer = Layer.effect(
         (s) => s.init().pipe(Effect.catchCause((cause) => Effect.logWarning("init failed", { cause }))),
         { concurrency: "unbounded", discard: true },
       ).pipe(Effect.withSpan("InstanceBootstrap.init"))
+
+      // Notification/Telemetry are plain modules (not Effect services — see
+      // src/notification/index.ts, src/telemetry/index.ts) that reach back into
+      // the Effect world themselves via AppRuntime, so they're initialized here
+      // as fire-and-forget calls rather than added to the `s.init()` list above.
+      yield* Effect.promise(() => Notification.init()).pipe(
+        Effect.catchCause((cause) => Effect.logWarning("notification init failed", { cause })),
+      )
+      yield* Effect.sync(() => Telemetry.init())
     }).pipe(Effect.withSpan("InstanceBootstrap"))
 
     return Service.of({ run })

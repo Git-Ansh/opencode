@@ -1,9 +1,9 @@
 import * as Tool from "./tool"
-import { Schema, Effect, Scope } from "effect"
+import { Schema, Effect, Scope, Cause } from "effect"
 import { Session } from "../session/session"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
-import { SessionPrompt } from "../session/prompt"
+import type { TaskPromptOps } from "./task"
 import { Delegation } from "../session/delegation"
 import { Database } from "@opencode-ai/core/database/database"
 
@@ -39,12 +39,21 @@ const DelegateParameters = Schema.Struct({
 // tool (as originally ported) since it targets a narrower set of read-only
 // agents and a simpler polling-based read-back model, but it may be worth
 // consolidating with `task` in a later pass.
+//
+// Note(port/wiring): originally yielded `SessionPrompt.Service` directly, but
+// `session/prompt.ts`'s own layer already depends on `tool/registry.ts`
+// (ToolRegistry.node) to resolve custom tools — yielding SessionPrompt.Service
+// here would make registry.ts need SessionPrompt.node too, a genuine
+// LayerNode cycle. `tool/task.ts` sidesteps exactly this by never taking
+// SessionPrompt.Service as an Effect dependency: prompt.ts builds a
+// `TaskPromptOps` object once per prompt loop and threads it through every
+// tool call via `ctx.extra.promptOps` (see session/tools.ts's `context()`).
+// This file now uses that same plumbing instead.
 export const DelegateTool = Tool.define(
   "delegate",
   Effect.gen(function* () {
     const agent = yield* Agent.Service
     const sessions = yield* Session.Service
-    const sessionPrompt = yield* SessionPrompt.Service
     const database = yield* Database.Service
     const scope = yield* Scope.Scope
 
@@ -67,6 +76,9 @@ Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")
           if (!["explore", "researcher", "reviewer"].includes(params.agent)) {
             return yield* Effect.fail(new Error(`Only read-only agents (explore, researcher, reviewer) can be delegated`))
           }
+
+          const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
+          if (!ops) return yield* Effect.fail(new Error("delegate tool requires promptOps in ctx.extra"))
 
           yield* ctx.ask({
             permission: "task",
@@ -111,9 +123,9 @@ Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")
           if (!model) return yield* Effect.fail(new Error("No model available to run the delegated agent"))
 
           // Fire and forget — don't await
-          const promptParts = yield* sessionPrompt.resolvePromptParts(params.prompt)
+          const promptParts = yield* ops.resolvePromptParts(params.prompt)
 
-          yield* sessionPrompt
+          yield* ops
             .prompt({
               sessionID: session.id,
               model,
@@ -121,7 +133,11 @@ Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")
               parts: promptParts,
             })
             .pipe(
-              Effect.matchEffect({
+              // Note(port/wiring): `ops.prompt` (see tool/task.ts's TaskPromptOps) already
+              // converts every failure into a defect (`Effect.catch(Effect.die)` in
+              // session/prompt.ts's `ops()`), so its error channel is `never` — use
+              // matchCauseEffect + Cause.squash to still observe/report failures here.
+              Effect.matchCauseEffect({
                 onSuccess: (result) =>
                   Effect.promise(async () => {
                     const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
@@ -133,8 +149,9 @@ Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")
                     })
                     log.info("delegation completed", { id: delegationID })
                   }),
-                onFailure: (err) =>
+                onFailure: (cause) =>
                   Effect.promise(async () => {
+                    const err = Cause.squash(cause)
                     await Delegation.update(delegationID, {
                       status: "error",
                       output: err instanceof Error ? err.message : String(err),

@@ -25,6 +25,8 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { Workspace } from "./workspace"
+import { SecretRedaction } from "@/security/redact"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -168,12 +170,24 @@ const layer = Layer.effect(
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return
+
+        // Redact secrets from tool output before it's persisted/sent back to the
+        // LLM, and feed the workspace tracker (modified files, test/build status)
+        // used by SystemPrompt.workspace() for the next turn's system prompt.
+        const redactedOutput = SecretRedaction.redactOutput(output.output ?? "")
+        Workspace.parseToolOutput(ctx.sessionID, match.part.tool, redactedOutput)
+        if (match.part.tool === "write" || match.part.tool === "edit" || match.part.tool === "apply_patch") {
+          const input = match.part.state.input
+          const filepath = isRecord(input) && typeof input.filePath === "string" ? input.filePath : ""
+          if (filepath) Workspace.trackFile(ctx.sessionID, filepath)
+        }
+
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "completed",
             input: match.part.state.input,
-            output: output.output,
+            output: redactedOutput,
             metadata: output.metadata,
             title: output.title,
             time: { start: match.part.state.time.start, end: Date.now() },

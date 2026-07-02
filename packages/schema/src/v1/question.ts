@@ -15,6 +15,13 @@ export const ID = Schema.String.check(Schema.isStartsWith("que")).pipe(
 export const Option = Schema.Struct({
   label: Schema.String.annotate({ description: "Display text (1-5 words, concise)" }),
   description: Schema.String.annotate({ description: "Explanation of choice" }),
+  detail: Schema.optional(Schema.String).annotate({
+    description:
+      "Extended explanation (2-4 sentences) revealed when the user asks for more detail on this option — implications and trade-offs",
+  }),
+  category: Schema.optional(Schema.String).annotate({
+    description: "Optional grouping label to organize options into sections",
+  }),
 }).annotate({ identifier: "QuestionOption" })
 
 const base = {

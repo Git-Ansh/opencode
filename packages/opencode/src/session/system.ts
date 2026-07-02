@@ -22,6 +22,9 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { AdaptivePrompt } from "./prompt/adaptive"
+import { ContextInjection } from "./context-injection"
+import { Workspace } from "./workspace"
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
@@ -43,6 +46,9 @@ export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
+  readonly adaptive: (recentMessages: string[]) => Effect.Effect<string[]>
+  readonly contextInjection: () => Effect.Effect<string[]>
+  readonly workspace: (sessionID: string) => Effect.Effect<string[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -123,6 +129,19 @@ const layer = Layer.effect(
           ]),
           "</mcp_instructions>",
         ].join("\n")
+      }),
+
+      adaptive: Effect.fn("SystemPrompt.adaptive")(function* (recentMessages: string[]) {
+        return yield* Effect.promise(() => AdaptivePrompt.compose(recentMessages))
+      }),
+
+      contextInjection: Effect.fn("SystemPrompt.contextInjection")(function* () {
+        return yield* Effect.promise(() => ContextInjection.gather())
+      }),
+
+      workspace: Effect.fn("SystemPrompt.workspace")(function* (sessionID: string) {
+        const summary = Workspace.summary(sessionID)
+        return summary ? [summary] : []
       }),
     })
   }),

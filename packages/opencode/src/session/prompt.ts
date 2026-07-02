@@ -56,6 +56,9 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Todo } from "./todo"
+import { ContextPruning } from "./context-pruning"
+import { ProjectMemory } from "./project-memory"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -99,6 +102,40 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
 
+// Todo awareness: inject current todos so the model knows to keep them updated.
+// Note(port): the original also appended a "[TODO REMINDER: ...]" string onto
+// individual action-tool outputs (bash/write/edit/apply_patch/git/test) after
+// each call. That hook point lived inline in this file's old tool-execution
+// loop; today tool execution is factored out into session/tools.ts (and the
+// output-mutation hook point equivalent to the original is
+// session/processor.ts's completeToolCall — see Phase 2 step 7). Wiring a
+// second reminder append there was judged out of scope for this pass since
+// it's not one of this file's listed changes; the system-prompt block below
+// already carries the same "call todowrite now" guidance every turn.
+function buildTodoPrompt(todos: Todo.Info[]) {
+  const completed = todos.filter((t) => t.status === "completed").length
+  const inProgress = todos.filter((t) => t.status === "in_progress").length
+  const pending = todos.filter((t) => t.status === "pending").length
+  const lines = todos.map((t) => {
+    const mark =
+      t.status === "completed" ? "x" : t.status === "in_progress" ? "*" : t.status === "cancelled" ? "-" : " "
+    return `  [${mark}] ${t.content}`
+  })
+  return [
+    `<current_todos progress="${completed}/${todos.length}" in_progress="${inProgress}" pending="${pending}">`,
+    ...lines,
+    `</current_todos>`,
+    ``,
+    `CRITICAL RULE — TODOWRITE UPDATES:`,
+    `The todo list above is displayed to the user in real-time. You MUST call the todowrite tool to update task statuses:`,
+    `1. BEFORE starting a task: mark it "in_progress"`,
+    `2. AFTER completing a task: mark it "completed" and mark the next one "in_progress"`,
+    `3. Call todowrite IMMEDIATELY — do NOT batch updates or wait until the end`,
+    `4. Every tool call you make should be followed by a todowrite call if it completes or starts a task`,
+    `If you fail to update the todo list, the user will see stale progress and think the system is broken.`,
+  ].join("\n")
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -136,6 +173,7 @@ const layer = Layer.effect(
     const revert = yield* SessionRevert.Service
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
+    const todo = yield* Todo.Service
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
@@ -1253,18 +1291,55 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
-              sys.environment(model),
-              instruction.system().pipe(Effect.orDie),
-              sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
-            ])
+            // Ephemeral context pruning: dedupe/supersede/purge stale tool output in a
+            // deep-cloned copy of the messages. Never persisted — only affects what's
+            // sent to the model this turn.
+            const prunedMsgs = ContextPruning.apply(msgs)
+            const recentTexts = msgs
+              .slice(-6)
+              .flatMap((m) => m.parts.filter((p) => p.type === "text").map((p) => p.text))
+
+            const [skills, env, instructions, mcpInstructions, modelMsgs, adaptivePrompts, injections, workspaceSummary, todos] =
+              yield* Effect.all([
+                sys.skills(agent),
+                sys.environment(model),
+                instruction.system().pipe(Effect.orDie),
+                sys.mcp(agent, session.permission),
+                MessageV2.toModelMessagesEffect(prunedMsgs, model),
+                sys.adaptive(recentTexts),
+                sys.contextInjection(),
+                sys.workspace(sessionID),
+                todo.get(sessionID),
+              ])
+
+            // Project memory: skip for non-git projects (worktree is "/") since there's
+            // no .opencode/memory/ to search relative to a real project root.
+            const memories =
+              ctx.worktree !== "/"
+                ? yield* Effect.promise(() => ProjectMemory.search(recentTexts.join(" ").slice(0, 500))).pipe(
+                    Effect.catch(() => Effect.succeed([])),
+                  )
+                : []
+
             const system = [
               ...env,
               ...instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
+              ...adaptivePrompts,
+              ...injections,
+              ...workspaceSummary,
+              ...(memories.length > 0
+                ? [
+                    [
+                      "<project_memory>",
+                      "Relevant project memories (from .opencode/memory/):",
+                      memories.map((m) => m.content).join("\n---\n"),
+                      "</project_memory>",
+                    ].join("\n"),
+                  ]
+                : []),
+              ...(todos.length > 0 ? [buildTodoPrompt(todos)] : []),
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1624,6 +1699,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    Todo.node,
   ],
 })
 
