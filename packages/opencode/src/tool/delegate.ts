@@ -49,6 +49,8 @@ const DelegateParameters = Schema.Struct({
 // `TaskPromptOps` object once per prompt loop and threads it through every
 // tool call via `ctx.extra.promptOps` (see session/tools.ts's `context()`).
 // This file now uses that same plumbing instead.
+const DELEGATABLE_AGENTS = ["explore", "researcher", "reviewer"]
+
 export const DelegateTool = Tool.define(
   "delegate",
   Effect.gen(function* () {
@@ -57,24 +59,35 @@ export const DelegateTool = Tool.define(
     const database = yield* Database.Service
     const scope = yield* Scope.Scope
 
-    const agents = (yield* agent.list()).filter(
-      (a) => a.mode === "subagent" && ["explore", "researcher", "reviewer"].includes(a.name),
-    )
-    const agentNames = agents.map((a) => a.name)
-
+    // Note(port/wiring): `agent.list()` reads per-instance config (InstanceState),
+    // which is only available once a project instance is loaded. `Tool.define`'s
+    // init Effect above runs once as part of ToolRegistry's global, instance-
+    // independent layer build (see tool/registry.ts), *before* any InstanceRef is
+    // provided — calling `agent.list()` here (as this used to) dies with
+    // "InstanceRef not provided" for every command, not just ones that use this
+    // tool. Same class of bug already worked around in tool/lint.ts and
+    // tool/test.ts: instance-scoped lookups must be deferred into `execute`,
+    // which always runs within a request that has a loaded instance. The static
+    // `description` below can no longer embed the live per-agent description
+    // text, so it just names the fixed allowlist instead.
     return {
       description: `Fire off an async research task that runs in the background. Returns immediately with a delegation ID. Use delegation_read to get results later. The task runs in a read-only sub-agent session.
 
-Available agents: ${agents.map((a) => `${a.name} (${a.description})`).join("; ")}`,
+Available agents: ${DELEGATABLE_AGENTS.join(", ")} (read-only subagents; use the \`task\` tool description for what each does).`,
       parameters: DelegateParameters,
       execute: (params: Schema.Schema.Type<typeof DelegateParameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          const agents = (yield* agent.list()).filter(
+            (a) => a.mode === "subagent" && DELEGATABLE_AGENTS.includes(a.name),
+          )
+          const agentNames = agents.map((a) => a.name)
+
           const next = yield* agent.get(params.agent)
           if (!next) return yield* Effect.fail(new Error(`Unknown agent: ${params.agent}. Available: ${agentNames.join(", ")}`))
 
           // Only allow read-only agents
-          if (!["explore", "researcher", "reviewer"].includes(params.agent)) {
-            return yield* Effect.fail(new Error(`Only read-only agents (explore, researcher, reviewer) can be delegated`))
+          if (!DELEGATABLE_AGENTS.includes(params.agent)) {
+            return yield* Effect.fail(new Error(`Only read-only agents (${DELEGATABLE_AGENTS.join(", ")}) can be delegated`))
           }
 
           const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
