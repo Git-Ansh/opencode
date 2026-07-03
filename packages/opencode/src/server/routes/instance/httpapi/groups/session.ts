@@ -74,6 +74,29 @@ export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput
 export const PermissionResponsePayload = Schema.Struct({
   response: PermissionV1.Reply,
 })
+export const DcpPayload = Schema.Struct({
+  providerID: ProviderV2.ID,
+  modelID: ModelV2.ID,
+})
+export const DcpStats = Schema.Struct({
+  before: Schema.Number,
+  after: Schema.Number,
+  pruned: Schema.Number,
+  kept: Schema.Number,
+  percentage: Schema.Number,
+}).annotate({ identifier: "DcpStats" })
+export const PlanDecisionPayload = Schema.Struct({
+  decision: Schema.Literals(["accept", "revise"]),
+  comments: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        stepIndex: Schema.Number,
+        stepText: Schema.String,
+        comment: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
+})
 
 export const SessionPaths = {
   list: root,
@@ -102,6 +125,8 @@ export const SessionPaths = {
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
   updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
+  dcp: `${root}/:sessionID/dcp`,
+  planDecision: `${root}/:sessionID/plan/decision`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -440,6 +465,34 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "part.update",
             description: "Update a part in a message.",
+          }),
+        ),
+        HttpApiEndpoint.post("dcp", SessionPaths.dcp, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: DcpPayload,
+          success: described(DcpStats, "Pruning stats"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.dcp",
+            summary: "Dynamic context pruning",
+            description:
+              "Prune context to fit a target model's context window while preserving the most relevant information.",
+          }),
+        ),
+        HttpApiEndpoint.post("planDecision", SessionPaths.planDecision, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: PlanDecisionPayload,
+          success: described(Schema.Boolean, "OK"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.planDecision",
+            summary: "Submit a plan review decision",
+            description:
+              "Called by the TUI Plan Review pane. Accept switches to the build agent and starts execution. Revise sends per-step rejection comments back to the plan agent for another pass.",
           }),
         ),
       )

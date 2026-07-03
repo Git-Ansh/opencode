@@ -15,6 +15,8 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { DCP } from "@/session/dcp"
+import { Provider } from "@/provider/provider"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -24,12 +26,14 @@ import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/htt
 import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
+  DcpPayload,
   DiffQuery,
   ForkPayload,
   InitPayload,
   ListQuery,
   MessagesQuery,
   PermissionResponsePayload,
+  PlanDecisionPayload,
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -59,6 +63,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
     const events = yield* EventV2Bridge.Service
+    const providerSvc = yield* Provider.Service
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
@@ -410,6 +415,80 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* session.updatePart(payload)
     })
 
+    const dcp = Effect.fn("SessionHttpApi.dcp")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof DcpPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const model = yield* providerSvc
+        .getModel(ctx.payload.providerID, ctx.payload.modelID)
+        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      return yield* Effect.tryPromise({
+        try: () => DCP.adapt({ sessionID: ctx.params.sessionID, model }),
+        catch: () => new HttpApiError.BadRequest({}),
+      })
+    })
+
+    const planDecision = Effect.fn("SessionHttpApi.planDecision")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof PlanDecisionPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+
+      // Find the most recent user message's model to use for the next turn.
+      const history = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+      const lastUser = history.findLast((item) => item.info.role === "user")
+      const lastUserModel = lastUser && lastUser.info.role === "user" ? lastUser.info.model : undefined
+      const model =
+        lastUserModel ??
+        (yield* providerSvc.defaultModel().pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))))
+
+      const targetAgent = ctx.payload.decision === "accept" ? "build" : "plan"
+
+      const text =
+        ctx.payload.decision === "accept"
+          ? "Plan approved by the user. Switching to the build agent. Execute the plan now."
+          : (() => {
+              const lines = (ctx.payload.comments ?? [])
+                .filter((comment) => comment.comment && comment.comment.trim().length > 0)
+                .map((comment) => `- Step ${comment.stepIndex + 1} ("${comment.stepText}"): ${comment.comment}`)
+              return lines.length > 0
+                ? `The user rejected parts of the plan with these comments:\n${lines.join(
+                    "\n",
+                  )}\n\nRevise the plan and call plan_propose again with the updated steps.`
+                : "The user rejected the plan. Revise it and call plan_propose again."
+            })()
+
+      const userMsg: SessionV1.User = {
+        id: MessageID.ascending(),
+        sessionID: ctx.params.sessionID,
+        role: "user",
+        time: { created: Date.now() },
+        agent: targetAgent,
+        model,
+      }
+      yield* session.updateMessage(userMsg)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: userMsg.id,
+        sessionID: ctx.params.sessionID,
+        type: "text",
+        text,
+        synthetic: true,
+      } satisfies SessionV1.TextPart)
+
+      // Fire-and-forget: the agent loop can run for minutes, so don't keep the
+      // HTTP client blocked. The TUI streams updates over events anyway.
+      yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("plan decision loop failed", { sessionID: ctx.params.sessionID, cause }),
+        ),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+
+      return true
+    })
+
     return handlers
       .handle("list", list)
       .handle("status", status)
@@ -438,5 +517,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
       .handle("updatePart", updatePart)
+      .handle("dcp", dcp)
+      .handle("planDecision", planDecision)
   }),
 )
