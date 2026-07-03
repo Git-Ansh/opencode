@@ -1,27 +1,48 @@
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
-import { createMemo, Show } from "solid-js"
+import { createMemo, createSignal, Show, Switch, Match } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { usePluginRuntime } from "../../plugin/runtime"
+import { useKeyboard } from "@opentui/solid"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
+import { ProgressDashboard } from "../../component/progress-dashboard"
+import { FileTree } from "../../component/file-tree"
 
-export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
+type SidebarTab = "info" | "files"
+
+export function Sidebar(props: {
+  sessionID: string
+  overlay?: boolean
+  onFileSelect?: (filepath: string) => void
+  splitPaneActive?: boolean
+}) {
   const pluginRuntime = usePluginRuntime()
   const project = useProject()
   const sync = useSync()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
   const session = createMemo(() => sync.session.get(props.sessionID))
+  const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
   const workspace = () => {
     const workspaceID = session()?.workspaceID
     if (!workspaceID) return
     return project.workspace.get(workspaceID)
   }
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+
+  const [tab, setTab] = createSignal<SidebarTab>("info")
+
+  // Ctrl+Y to cycle sidebar tabs (Info / Project file tree)
+  useKeyboard((evt) => {
+    if (evt.ctrl && evt.name === "y") {
+      evt.preventDefault()
+      setTab((t) => (t === "info" ? "files" : "info"))
+    }
+  })
 
   return (
     <Show when={session()}>
@@ -35,56 +56,81 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         paddingRight={2}
         position={props.overlay ? "absolute" : "relative"}
       >
-        <scrollbox
-          flexGrow={1}
-          scrollAcceleration={scrollAcceleration()}
-          verticalScrollbarOptions={{
-            trackOptions: {
-              backgroundColor: theme.background,
-              foregroundColor: theme.borderActive,
-            },
-          }}
-        >
-          <box flexShrink={0} gap={1} paddingRight={1}>
-            <pluginRuntime.Slot
-              name="sidebar_title"
-              mode="single_winner"
-              session_id={props.sessionID}
-              title={session()!.title}
-              share_url={session()!.share?.url}
+        <box flexDirection="row" gap={2} paddingBottom={1} flexShrink={0}>
+          <text fg={tab() === "info" ? theme.accent : theme.textMuted} onMouseDown={() => setTab("info")}>
+            {tab() === "info" ? "● " : "  "}Info
+          </text>
+          <text fg={tab() === "files" ? theme.accent : theme.textMuted} onMouseDown={() => setTab("files")}>
+            {tab() === "files" ? "● " : "  "}Project
+          </text>
+        </box>
+        <Switch>
+          <Match when={tab() === "files"}>
+            <FileTree
+              width={36}
+              modifiedFiles={diff()
+                .map((d) => d.file)
+                .filter((f): f is string => !!f)}
+              active={!props.splitPaneActive}
+              onSelect={(filepath) => props.onFileSelect?.(filepath)}
+            />
+          </Match>
+          <Match when={tab() === "info"}>
+            <scrollbox
+              flexGrow={1}
+              scrollAcceleration={scrollAcceleration()}
+              verticalScrollbarOptions={{
+                trackOptions: {
+                  backgroundColor: theme.background,
+                  foregroundColor: theme.borderActive,
+                },
+              }}
             >
-              <box paddingRight={1}>
-                <text fg={theme.text}>
-                  <b>{session()!.title}</b>
-                </text>
-                <Show when={InstallationChannel !== "latest"}>
-                  <text fg={theme.textMuted}>{props.sessionID}</text>
-                </Show>
-                <Show when={session()!.workspaceID}>
-                  <text fg={theme.textMuted}>
-                    <Show
-                      when={workspace()}
-                      fallback={<WorkspaceLabel type="unknown" name={session()!.workspaceID!} status="error" icon />}
-                    >
-                      {(item) => (
-                        <WorkspaceLabel
-                          type={item().type}
-                          name={item().name}
-                          status={project.workspace.status(item().id) ?? "error"}
-                          icon
-                        />
-                      )}
+              <box flexShrink={0} gap={1} paddingRight={1}>
+                <pluginRuntime.Slot
+                  name="sidebar_title"
+                  mode="single_winner"
+                  session_id={props.sessionID}
+                  title={session()!.title}
+                  share_url={session()!.share?.url}
+                >
+                  <box paddingRight={1}>
+                    <text fg={theme.text}>
+                      <b>{session()!.title}</b>
+                    </text>
+                    <Show when={InstallationChannel !== "latest"}>
+                      <text fg={theme.textMuted}>{props.sessionID}</text>
                     </Show>
-                  </text>
-                </Show>
-                <Show when={session()!.share?.url}>
-                  <text fg={theme.textMuted}>{session()!.share!.url}</text>
-                </Show>
+                    <Show when={session()!.workspaceID}>
+                      <text fg={theme.textMuted}>
+                        <Show
+                          when={workspace()}
+                          fallback={
+                            <WorkspaceLabel type="unknown" name={session()!.workspaceID!} status="error" icon />
+                          }
+                        >
+                          {(item) => (
+                            <WorkspaceLabel
+                              type={item().type}
+                              name={item().name}
+                              status={project.workspace.status(item().id) ?? "error"}
+                              icon
+                            />
+                          )}
+                        </Show>
+                      </text>
+                    </Show>
+                    <Show when={session()!.share?.url}>
+                      <text fg={theme.textMuted}>{session()!.share!.url}</text>
+                    </Show>
+                  </box>
+                </pluginRuntime.Slot>
+                <ProgressDashboard sessionID={props.sessionID} />
+                <pluginRuntime.Slot name="sidebar_content" session_id={props.sessionID} />
               </box>
-            </pluginRuntime.Slot>
-            <pluginRuntime.Slot name="sidebar_content" session_id={props.sessionID} />
-          </box>
-        </scrollbox>
+            </scrollbox>
+          </Match>
+        </Switch>
 
         <box flexShrink={0} gap={1} paddingTop={1}>
           <pluginRuntime.Slot name="sidebar_footer" mode="single_winner" session_id={props.sessionID}>

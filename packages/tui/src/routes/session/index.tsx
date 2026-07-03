@@ -40,7 +40,7 @@ import type {
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
@@ -54,6 +54,12 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { SplitPane, type SecondaryMode } from "./split-pane"
+import { TerminalView } from "./terminal-view"
+import { AgentsView } from "./agents-view"
+import { DiffView } from "./diff-view"
+import { PlanReview, parsePlanSteps, type PlanStep } from "./plan-review"
+import { HelpOverlay } from "./help-overlay"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -260,6 +266,28 @@ export function Session() {
   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
 
+  // Split pane (secondary view alongside the transcript: terminal/agents/files/plan)
+  const [splitMode, _setSplitMode] = createSignal<SecondaryMode>("none")
+  const [lastSplitTab, setLastSplitTab] = createSignal<Exclude<SecondaryMode, "none">>("terminal")
+  const setSplitMode = (mode: SecondaryMode | ((prev: SecondaryMode) => SecondaryMode)) => {
+    const resolved = typeof mode === "function" ? mode(splitMode()) : mode
+    if (resolved !== "none") setLastSplitTab(resolved)
+    _setSplitMode(resolved)
+  }
+  const [splitRatio, setSplitRatio] = createSignal(0.6)
+  const [userOpenedFiles, setUserOpenedFiles] = createSignal<string[]>([])
+  const hasAgents = createMemo(() => sync.data.session.some((s) => s.parentID === route.sessionID))
+  // Persistent filter + list state per tab (survives tab switches)
+  const [agentsFilter, setAgentsFilter] = createSignal<"all" | "active" | "done">("active")
+  const [terminalFilter, setTerminalFilter] = createSignal<"all" | "running" | "done">("running")
+  const [filesFilter, setFilesFilter] = createSignal<"all" | "modified" | "opened">("modified")
+  const [agentsShowList, setAgentsShowList] = createSignal(true)
+  const [terminalShowList, setTerminalShowList] = createSignal(true)
+  const [filesShowList, setFilesShowList] = createSignal(true)
+  const [planSteps, setPlanSteps] = createSignal<PlanStep[]>([])
+  const [planSummary, setPlanSummary] = createSignal<string | undefined>(undefined)
+  let planSourceForSession: "tool" | "text" | undefined = undefined
+
   const wide = createMemo(() => dimensions().width > 120)
   const sidebarVisible = createMemo(() => {
     if (session()?.parentID) return false
@@ -268,7 +296,7 @@ export function Session() {
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 5)
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -317,19 +345,100 @@ export function Session() {
   })
 
   let lastSwitch: string | undefined = undefined
+  let bashAutoOpenTimeout: ReturnType<typeof setTimeout> | undefined
+
   event.on("message.part.updated", (evt) => {
     const part = evt.properties.part
-    if (part.type !== "tool") return
     if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
-    if (part.id === lastSwitch) return
 
-    if (part.tool === "plan_exit") {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
+    // Text-parsing fallback for plan mode: only when no plan_propose has fired this session
+    if (part.type === "text" && planSourceForSession !== "tool" && local.agent.current()?.name === "plan") {
+      const text = part.text ?? ""
+      if (text.length > 80) {
+        const parsed = parsePlanSteps(text)
+        if (parsed.length >= 2 && parsed.length !== planSteps().length) {
+          batch(() => {
+            setPlanSteps(parsed)
+            setPlanSummary(undefined)
+            if (!sidebarVisible()) {
+              setSidebar(() => "auto")
+              setSidebarOpen(true)
+            }
+            setSplitMode("plan")
+          })
+          planSourceForSession = "text"
+        }
+      }
+    }
+
+    if (part.type !== "tool") return
+
+    // plan_propose tool — primary detection path
+    if (part.tool === "plan_propose" && part.state.status === "completed") {
+      const input = part.state.input as
+        | { summary?: string; steps?: Array<{ text: string; files?: string[]; rationale?: string }> }
+        | undefined
+      if (input?.steps?.length) {
+        const steps: PlanStep[] = input.steps.map((s, i) => ({
+          id: i,
+          text: s.text,
+          status: "pending",
+          files: s.files,
+          rationale: s.rationale,
+        }))
+        batch(() => {
+          setPlanSummary(input.summary)
+          setPlanSteps(steps)
+          if (!sidebarVisible()) {
+            setSidebar(() => "auto")
+            setSidebarOpen(true)
+          }
+          setSplitMode("plan")
+        })
+        planSourceForSession = "tool"
+      }
+    }
+
+    // Plan mode switching (only on completed)
+    if (part.state.status === "completed" && part.id !== lastSwitch) {
+      if (part.tool === "plan_exit") {
+        local.agent.set("build")
+        lastSwitch = part.id
+      } else if (part.tool === "plan_enter") {
+        local.agent.set("plan")
+        lastSwitch = part.id
+      }
+    }
+
+    // Gate auto-open behind question check — don't switch panes while question is showing
+    const hasQuestion = questions().length > 0
+
+    // Auto-open files view on write/edit completion
+    if (
+      !hasQuestion &&
+      (part.tool === "write" || part.tool === "edit") &&
+      (part.state.status === "completed" || part.state.status === "error")
+    ) {
+      if (splitMode() !== "files") setSplitMode("files")
+    }
+
+    // Auto-open terminal for long-running bash (>2s)
+    if (!hasQuestion && part.tool === "bash" && part.state.status === "running") {
+      if (bashAutoOpenTimeout) clearTimeout(bashAutoOpenTimeout)
+      bashAutoOpenTimeout = setTimeout(() => {
+        if (splitMode() === "none") setSplitMode("terminal")
+      }, 2000)
+    }
+    if (part.tool === "bash" && (part.state.status === "completed" || part.state.status === "error")) {
+      if (bashAutoOpenTimeout) {
+        clearTimeout(bashAutoOpenTimeout)
+        bashAutoOpenTimeout = undefined
+      }
+    }
+
+    // Auto-open agents view when orchestration starts
+    if (!hasQuestion && part.tool === "orchestrate" && part.state.status === "running") {
+      setSplitMode("agents")
     }
   })
 
@@ -365,6 +474,31 @@ export function Session() {
       if (dontShowAgain) kv.set(keys.dontShow, true)
       kv.set(keys.lastSeenAt, Date.now())
     })
+  })
+
+  // Ctrl+L to toggle sidebar
+  useKeyboard((evt) => {
+    if (evt.ctrl && evt.name === "l") {
+      evt.preventDefault()
+      const isVisible = sidebarVisible()
+      setSidebar(() => (isVisible ? "hide" : "auto"))
+      setSidebarOpen(!isVisible)
+    }
+  })
+
+  const [helpVisible, setHelpVisible] = createSignal(false)
+
+  // Ctrl+G to toggle help overlay; Esc to dismiss
+  useKeyboard((evt) => {
+    if (evt.ctrl && evt.name === "g") {
+      evt.preventDefault()
+      setHelpVisible((v) => !v)
+      return
+    }
+    if (helpVisible() && evt.name === "escape") {
+      evt.preventDefault()
+      setHelpVisible(false)
+    }
   })
 
   // Helper: Find next visible message boundary in direction
@@ -421,6 +555,63 @@ export function Session() {
   }
 
   const local = useLocal()
+
+  // Trigger DCP (dynamic context pruning) when model changes mid-session
+  let prevModelKey = ""
+  createEffect(() => {
+    const current = local.model.current()
+    if (!current) return
+    const key = `${current.providerID}/${current.modelID}`
+    if (prevModelKey && prevModelKey !== key && messages().length > 0) {
+      sdk
+        .fetch(`${sdk.url}/session/${route.sessionID}/dcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ providerID: current.providerID, modelID: current.modelID }),
+        })
+        .then((r) => r.json())
+        .then((result: any) => {
+          if (result?.pruned > 0) {
+            toast.show({
+              message: `Context pruned: ${result.before} → ${result.after} tokens (kept ${result.kept}%)`,
+              variant: "info",
+              duration: 4000,
+            })
+          } else {
+            toast.show({
+              message: `Model switched — context fits (${result.percentage ?? 0}% used)`,
+              variant: "info",
+              duration: 2000,
+            })
+          }
+        })
+        .catch(() => {})
+    }
+    prevModelKey = key
+  })
+
+  // Auto-show sidebar + agents view when sub-agents first appear (orchestration)
+  let agentsAutoOpened = false
+  createEffect(() => {
+    const activeSubAgents = sync.data.session.filter(
+      (s) => s.parentID === route.sessionID && sync.data.session_status[s.id]?.type === "busy",
+    )
+    if (activeSubAgents.length > 0 && !agentsAutoOpened && questions().length === 0) {
+      agentsAutoOpened = true
+      if (!sidebarVisible()) {
+        batch(() => {
+          setSidebar(() => "auto")
+          setSidebarOpen(true)
+        })
+      }
+      if (splitMode() !== "agents") {
+        setSplitMode("agents")
+      }
+    }
+    if (activeSubAgents.length === 0) {
+      agentsAutoOpened = false
+    }
+  })
 
   function enterChild(sessionID: string) {
     navigate({
@@ -555,6 +746,7 @@ export function Session() {
       title: "Compact session",
       value: "session.compact",
       category: "Session",
+      suggested: messages().length > 20,
       slash: {
         name: "compact",
         aliases: ["summarize"],
@@ -1078,6 +1270,84 @@ export function Session() {
         moveChild(-1)
       }),
     },
+    {
+      title: "Show file tree",
+      value: "session.files",
+      category: "Session",
+      slash: {
+        name: "files",
+      },
+      run: () => {
+        batch(() => {
+          if (!sidebarVisible()) {
+            setSidebar(() => "auto")
+            setSidebarOpen(true)
+          }
+        })
+        dialog.clear()
+      },
+    },
+    {
+      title: splitMode() === "terminal" ? "Close terminal view" : "Show terminal view",
+      value: "session.split.terminal",
+      category: "Split Pane",
+      slash: {
+        name: "terminal",
+      },
+      run: () => {
+        setSplitMode(splitMode() === "terminal" ? "none" : "terminal")
+        dialog.clear()
+      },
+    },
+    {
+      title: splitMode() === "agents" ? "Close agents view" : "Show agents view",
+      value: "session.split.agents",
+      category: "Split Pane",
+      slash: {
+        name: "agents",
+      },
+      run: () => {
+        setSplitMode(splitMode() === "agents" ? "none" : "agents")
+        dialog.clear()
+      },
+    },
+    {
+      title: splitMode() === "files" ? "Close files view" : "Show files view",
+      value: "session.split.files",
+      category: "Split Pane",
+      slash: {
+        name: "files-view",
+      },
+      run: () => {
+        setSplitMode(splitMode() === "files" ? "none" : "files")
+        dialog.clear()
+      },
+    },
+    {
+      title: "Close split pane",
+      value: "session.split.close",
+      category: "Split Pane",
+      enabled: splitMode() !== "none",
+      slash: {
+        name: "unsplit",
+      },
+      run: () => {
+        setSplitMode("none")
+        dialog.clear()
+      },
+    },
+    {
+      title: "Orchestrate review",
+      value: "session.orchestrate.review",
+      category: "Orchestrate",
+      slash: {
+        name: "orchestrate",
+      },
+      run: () => {
+        dialog.clear()
+        toast.show({ message: "Use the orchestrate tool in your prompt to coordinate agents", variant: "info" })
+      },
+    },
   ])
 
   const sessionCommands = createMemo(() =>
@@ -1163,168 +1433,305 @@ export function Session() {
         }}
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
-          <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
-            <Show when={session()}>
-              <scrollbox
-                ref={(r) => (scroll = r)}
-                viewportOptions={{
-                  paddingRight: showScrollbar() ? 1 : 0,
-                }}
-                verticalScrollbarOptions={{
-                  paddingLeft: 1,
-                  visible: showScrollbar(),
-                  trackOptions: {
-                    backgroundColor: theme.backgroundElement,
-                    foregroundColor: theme.border,
-                  },
-                }}
-                stickyScroll={true}
-                stickyStart="bottom"
-                flexGrow={1}
-                scrollAcceleration={scrollAcceleration()}
-              >
-                <box height={1} />
-                <For each={messages()}>
-                  {(message, index) => (
-                    <Switch>
-                      <Match when={message.id === revert()?.messageID}>
-                        {(function () {
-                          const redoShortcut = useCommandShortcut("session.redo")
-                          const [hover, setHover] = createSignal(false)
-                          const dialog = useDialog()
+          <SplitPane
+            width={contentWidth() + 4}
+            height={dimensions().height}
+            secondary={splitMode}
+            setSecondary={setSplitMode}
+            ratio={splitRatio}
+            setRatio={setSplitRatio}
+            hasAgents={hasAgents()}
+            lastTab={lastSplitTab}
+            secondaryContent={
+              <Switch>
+                <Match when={splitMode() === "terminal"}>
+                  <TerminalView
+                    sessionID={route.sessionID}
+                    filterMode={terminalFilter}
+                    setFilterMode={setTerminalFilter}
+                    showList={terminalShowList}
+                    setShowList={setTerminalShowList}
+                  />
+                </Match>
+                <Match when={splitMode() === "agents"}>
+                  <AgentsView
+                    sessionID={route.sessionID}
+                    filterMode={agentsFilter}
+                    setFilterMode={setAgentsFilter}
+                    showList={agentsShowList}
+                    setShowList={setAgentsShowList}
+                  />
+                </Match>
+                <Match when={splitMode() === "files"}>
+                  <DiffView
+                    sessionID={route.sessionID}
+                    openedFiles={userOpenedFiles()}
+                    onCloseFile={(fp) => setUserOpenedFiles((prev) => prev.filter((f) => f !== fp))}
+                    filterMode={filesFilter}
+                    setFilterMode={setFilesFilter}
+                    showList={filesShowList}
+                    setShowList={setFilesShowList}
+                  />
+                </Match>
+                <Match when={splitMode() === "plan"}>
+                  <PlanReview
+                    summary={planSummary()}
+                    steps={planSteps()}
+                    onClose={() => setSplitMode("none")}
+                    onAccept={async () => {
+                      try {
+                        const r = await sdk.fetch(`${sdk.url}/session/${route.sessionID}/plan/decision`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ decision: "accept" }),
+                        })
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+                        batch(() => {
+                          setPlanSteps([])
+                          setPlanSummary(undefined)
+                          planSourceForSession = undefined
+                          setSplitMode("none")
+                        })
+                        toast.show({
+                          message: "Plan approved — switching to build agent",
+                          variant: "info",
+                          duration: 2500,
+                        })
+                      } catch (e) {
+                        toast.show({ message: `Plan accept failed: ${String(e)}`, variant: "error", duration: 5000 })
+                      }
+                    }}
+                    onRevise={async (rejected) => {
+                      try {
+                        const r = await sdk.fetch(`${sdk.url}/session/${route.sessionID}/plan/decision`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ decision: "revise", comments: rejected }),
+                        })
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+                        batch(() => {
+                          setPlanSteps([])
+                          setPlanSummary(undefined)
+                          planSourceForSession = undefined
+                          setSplitMode("none")
+                        })
+                        toast.show({
+                          message: `Sent revision request (${rejected.length} step${rejected.length === 1 ? "" : "s"} rejected)`,
+                          variant: "info",
+                          duration: 2500,
+                        })
+                      } catch (e) {
+                        toast.show({ message: `Plan revise failed: ${String(e)}`, variant: "error", duration: 5000 })
+                      }
+                    }}
+                  />
+                </Match>
+              </Switch>
+            }
+          >
+            <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
+              <Show when={session()}>
+                <scrollbox
+                  ref={(r) => (scroll = r)}
+                  viewportOptions={{
+                    paddingRight: showScrollbar() ? 1 : 0,
+                  }}
+                  verticalScrollbarOptions={{
+                    paddingLeft: 1,
+                    visible: showScrollbar(),
+                    trackOptions: {
+                      backgroundColor: theme.backgroundElement,
+                      foregroundColor: theme.border,
+                    },
+                  }}
+                  stickyScroll={true}
+                  stickyStart="bottom"
+                  flexGrow={1}
+                  scrollAcceleration={scrollAcceleration()}
+                >
+                  <box height={1} />
+                  <For each={messages()}>
+                    {(message, index) => (
+                      <Switch>
+                        <Match when={message.id === revert()?.messageID}>
+                          {(function () {
+                            const redoShortcut = useCommandShortcut("session.redo")
+                            const [hover, setHover] = createSignal(false)
+                            const dialog = useDialog()
 
-                          const handleUnrevert = async () => {
-                            const confirmed = await DialogConfirm.show(
-                              dialog,
-                              "Confirm Redo",
-                              "Are you sure you want to restore the reverted messages?",
-                            )
-                            if (confirmed) {
-                              keymap.dispatchCommand("session.redo")
+                            const handleUnrevert = async () => {
+                              const confirmed = await DialogConfirm.show(
+                                dialog,
+                                "Confirm Redo",
+                                "Are you sure you want to restore the reverted messages?",
+                              )
+                              if (confirmed) {
+                                keymap.dispatchCommand("session.redo")
+                              }
                             }
-                          }
 
-                          return (
-                            <box
-                              onMouseOver={() => setHover(true)}
-                              onMouseOut={() => setHover(false)}
-                              onMouseUp={handleUnrevert}
-                              marginTop={1}
-                              flexShrink={0}
-                              border={["left"]}
-                              customBorderChars={SplitBorder.customBorderChars}
-                              borderColor={theme.backgroundPanel}
-                            >
+                            return (
                               <box
-                                paddingTop={1}
-                                paddingBottom={1}
-                                paddingLeft={2}
-                                backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+                                onMouseOver={() => setHover(true)}
+                                onMouseOut={() => setHover(false)}
+                                onMouseUp={handleUnrevert}
+                                marginTop={1}
+                                flexShrink={0}
+                                border={["left"]}
+                                customBorderChars={SplitBorder.customBorderChars}
+                                borderColor={theme.backgroundPanel}
                               >
-                                <text fg={theme.textMuted}>{revert()!.reverted.length} message reverted</text>
-                                <text fg={theme.textMuted}>
-                                  <span style={{ fg: theme.text }}>{redoShortcut()}</span> or /redo to restore
-                                </text>
-                                <Show when={revert()!.diffFiles?.length}>
-                                  <box marginTop={1}>
-                                    <For each={revert()!.diffFiles}>
-                                      {(file) => (
-                                        <text fg={theme.text}>
-                                          {file.filename}
-                                          <Show when={file.additions > 0}>
-                                            <span style={{ fg: theme.diffAdded }}> +{file.additions}</span>
-                                          </Show>
-                                          <Show when={file.deletions > 0}>
-                                            <span style={{ fg: theme.diffRemoved }}> -{file.deletions}</span>
-                                          </Show>
-                                        </text>
-                                      )}
-                                    </For>
-                                  </box>
-                                </Show>
+                                <box
+                                  paddingTop={1}
+                                  paddingBottom={1}
+                                  paddingLeft={2}
+                                  backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
+                                >
+                                  <text fg={theme.textMuted}>{revert()!.reverted.length} message reverted</text>
+                                  <text fg={theme.textMuted}>
+                                    <span style={{ fg: theme.text }}>{redoShortcut()}</span> or /redo to restore
+                                  </text>
+                                  <Show when={revert()!.diffFiles?.length}>
+                                    <box marginTop={1}>
+                                      <For each={revert()!.diffFiles}>
+                                        {(file) => (
+                                          <text fg={theme.text}>
+                                            {file.filename}
+                                            <Show when={file.additions > 0}>
+                                              <span style={{ fg: theme.diffAdded }}> +{file.additions}</span>
+                                            </Show>
+                                            <Show when={file.deletions > 0}>
+                                              <span style={{ fg: theme.diffRemoved }}> -{file.deletions}</span>
+                                            </Show>
+                                          </text>
+                                        )}
+                                      </For>
+                                    </box>
+                                  </Show>
+                                </box>
                               </box>
-                            </box>
-                          )
-                        })()}
-                      </Match>
-                      <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
-                        <></>
-                      </Match>
-                      <Match when={message.role === "user"}>
-                        <UserMessage
-                          index={index()}
-                          onMouseUp={() => {
-                            if (renderer.getSelection()?.getSelectedText()) return
-                            dialog.replace(() => (
-                              <DialogMessage
-                                messageID={message.id}
-                                sessionID={route.sessionID}
-                                setPrompt={(promptInfo) => prompt?.set(promptInfo)}
-                              />
-                            ))
-                          }}
-                          message={message as UserMessage}
-                          parts={sync.data.part[message.id] ?? []}
-                          pending={pending()}
-                        />
-                      </Match>
-                      <Match when={message.role === "assistant"}>
-                        <AssistantMessage
-                          last={lastAssistant()?.id === message.id}
-                          message={message as AssistantMessage}
-                          parts={sync.data.part[message.id] ?? []}
-                        />
-                      </Match>
-                    </Switch>
-                  )}
-                </For>
-              </scrollbox>
-              <box flexShrink={0}>
-                <Show when={permissions().length > 0}>
-                  <PermissionPrompt
-                    request={permissions()[0]}
-                    directory={sync.session.get(permissions()[0].sessionID)?.directory}
-                  />
-                </Show>
-                <Show when={permissions().length === 0 && questions().length > 0}>
-                  <QuestionPrompt
-                    request={questions()[0]}
-                    directory={sync.session.get(questions()[0].sessionID)?.directory}
-                  />
-                </Show>
-                <Show when={session()?.parentID}>
-                  <SubagentFooter />
-                </Show>
-                <Show when={visible()}>
-                  <pluginRuntime.Slot
-                    name="session_prompt"
-                    mode="replace"
-                    session_id={route.sessionID}
-                    visible={visible()}
-                    disabled={disabled()}
-                    on_submit={toBottom}
-                    ref={bind}
-                  >
-                    <Prompt
-                      visible={visible()}
-                      ref={bind}
-                      disabled={disabled()}
-                      onSubmit={() => {
-                        toBottom()
-                      }}
-                      sessionID={route.sessionID}
-                      right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
+                            )
+                          })()}
+                        </Match>
+                        <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
+                          <></>
+                        </Match>
+                        <Match when={message.role === "user"}>
+                          <UserMessage
+                            index={index()}
+                            onMouseUp={() => {
+                              if (renderer.getSelection()?.getSelectedText()) return
+                              dialog.replace(() => (
+                                <DialogMessage
+                                  messageID={message.id}
+                                  sessionID={route.sessionID}
+                                  setPrompt={(promptInfo) => prompt?.set(promptInfo)}
+                                />
+                              ))
+                            }}
+                            message={message as UserMessage}
+                            parts={sync.data.part[message.id] ?? []}
+                            pending={pending()}
+                          />
+                        </Match>
+                        <Match when={message.role === "assistant"}>
+                          <AssistantMessage
+                            last={lastAssistant()?.id === message.id}
+                            message={message as AssistantMessage}
+                            parts={sync.data.part[message.id] ?? []}
+                          />
+                        </Match>
+                      </Switch>
+                    )}
+                  </For>
+                </scrollbox>
+                <box flexShrink={0}>
+                  <Show when={permissions().length > 0}>
+                    <PermissionPrompt
+                      request={permissions()[0]}
+                      directory={sync.session.get(permissions()[0].sessionID)?.directory}
                     />
-                  </pluginRuntime.Slot>
-                </Show>
-              </box>
-            </Show>
-            <Toast />
-          </box>
+                  </Show>
+                  <Show when={permissions().length === 0 && questions().length > 0}>
+                    <QuestionPrompt
+                      request={questions()[0]}
+                      directory={sync.session.get(questions()[0].sessionID)?.directory}
+                    />
+                  </Show>
+                  <Show when={session()?.parentID}>
+                    <SubagentFooter />
+                  </Show>
+                  <Show when={visible()}>
+                    <box flexDirection="row" gap={2} paddingLeft={2} paddingRight={2} flexShrink={0}>
+                      <Show when={!sidebarVisible()}>
+                        <text fg={theme.textMuted}>
+                          <span style={{ fg: theme.text }}>Ctrl+L</span> Sidebar
+                        </text>
+                      </Show>
+                      <Show when={splitMode() === "none"}>
+                        <text fg={theme.textMuted}>
+                          <span style={{ fg: theme.text }}>Ctrl+B</span> Pane
+                        </text>
+                      </Show>
+                      <text fg={theme.textMuted}>
+                        <span style={{ fg: theme.text }}>Ctrl+G</span> Help
+                      </text>
+                    </box>
+                  </Show>
+                  <Show when={visible()}>
+                    <pluginRuntime.Slot
+                      name="session_prompt"
+                      mode="replace"
+                      session_id={route.sessionID}
+                      visible={visible()}
+                      disabled={disabled()}
+                      on_submit={toBottom}
+                      ref={bind}
+                    >
+                      <Prompt
+                        visible={visible()}
+                        ref={bind}
+                        disabled={disabled()}
+                        onSubmit={() => {
+                          toBottom()
+                        }}
+                        sessionID={route.sessionID}
+                        right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
+                      />
+                    </pluginRuntime.Slot>
+                  </Show>
+                </box>
+              </Show>
+              <Toast />
+            </box>
+          </SplitPane>
+          {/* Sidebar toggle button — always visible */}
+          <Show when={!session()?.parentID}>
+            <box
+              width={1}
+              height={dimensions().height}
+              justifyContent="center"
+              alignItems="center"
+              onMouseDown={() => {
+                const isVisible = sidebarVisible()
+                setSidebar(() => (isVisible ? "hide" : "auto"))
+                setSidebarOpen(!isVisible)
+              }}
+            >
+              <text fg={theme.textMuted}>{sidebarVisible() ? "‹" : "›"}</text>
+            </box>
+          </Show>
           <Show when={sidebarVisible()}>
             <Switch>
               <Match when={wide()}>
-                <Sidebar sessionID={route.sessionID} />
+                <Sidebar
+                  sessionID={route.sessionID}
+                  onFileSelect={(fp) => {
+                    setUserOpenedFiles((prev) => (prev.includes(fp) ? prev : [...prev, fp]))
+                    setSplitMode("files")
+                  }}
+                  splitPaneActive={splitMode() !== "none"}
+                />
               </Match>
               <Match when={!wide()}>
                 <box
@@ -1336,10 +1743,20 @@ export function Session() {
                   alignItems="flex-end"
                   backgroundColor={RGBA.fromInts(0, 0, 0, 70)}
                 >
-                  <Sidebar sessionID={route.sessionID} />
+                  <Sidebar
+                    sessionID={route.sessionID}
+                    onFileSelect={(fp) => {
+                      setUserOpenedFiles((prev) => (prev.includes(fp) ? prev : [...prev, fp]))
+                      setSplitMode("files")
+                    }}
+                    splitPaneActive={splitMode() !== "none"}
+                  />
                 </box>
               </Match>
             </Switch>
+          </Show>
+          <Show when={helpVisible()}>
+            <HelpOverlay onClose={() => setHelpVisible(false)} />
           </Show>
         </box>
       </context.Provider>

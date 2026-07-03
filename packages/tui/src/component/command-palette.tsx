@@ -9,6 +9,7 @@ import {
   useOpencodeKeymap,
 } from "../keymap"
 import { useTuiConfig } from "../config"
+import { useFrecency } from "../prompt/frecency"
 
 type PaletteCommandEntry = ReturnType<OpenTuiKeymap["getCommandEntries"]>[number]
 
@@ -26,6 +27,7 @@ function isSuggestedPaletteCommand(entry: PaletteCommandEntry) {
 export function CommandPaletteDialog() {
   const config = useTuiConfig()
   const keymap = useOpencodeKeymap()
+  const frecency = useFrecency()
   const entries = useKeymapSelector((keymap: OpenTuiKeymap) => {
     const query = {
       namespace: "palette",
@@ -55,9 +57,24 @@ export function CommandPaletteDialog() {
       suggested: isSuggestedPaletteCommand(entry),
       onSelect: (dialog: DialogContext) => {
         dialog.clear()
+        frecency.updateCommandFrecency(entry.command.name)
         keymap.dispatchCommand(entry.command.name)
       },
     })),
+  )
+  // Most-recently/frequently-used commands, shown as a "Recent" section above the
+  // full list (mirrors the "Suggested" section below). Frecency data is tracked in
+  // onSelect above and persisted under "cmd:<name>" keys (see prompt/frecency.tsx).
+  const recentOptions = createMemo(() =>
+    options()
+      .filter((option) => frecency.getCommandFrecency(option.value) > 0)
+      .toSorted((a, b) => frecency.getCommandFrecency(b.value) - frecency.getCommandFrecency(a.value))
+      .slice(0, 10)
+      .map((option) => ({
+        ...option,
+        value: `recent:${option.value}`,
+        category: "Recent",
+      })),
   )
 
   let ref: DialogSelectRef<string>
@@ -71,6 +88,7 @@ export function CommandPaletteDialog() {
           value: `suggested:${option.value}`,
           category: "Suggested",
         })),
+      ...recentOptions(),
       ...options(),
     ]
   }

@@ -27,12 +27,10 @@ export const QuestionTool = Tool.define<typeof Parameters, Metadata, Question.Se
             tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
           })
 
-          // "Tell me more": the TUI sends this sentinel answer when the user asks to see
-          // an option's `detail` field before deciding (see tool/question.txt).
-          // TODO(port): the TUI-side trigger (pressing `?` to send "[ELABORATE]" and to
-          // render `detail`/`category`) lives in packages/tui's question route, which is
-          // Phase 4 (TUI relocation) work and hasn't been re-wired yet — this backend half
-          // is forward-compatible but currently unreachable until that lands.
+          // "Tell me more": the TUI sends this sentinel answer when the user presses `m`
+          // ("tell me more") to see each option's `detail` field explained before deciding.
+          // `?` toggles showing `detail` inline without a round-trip. Both are wired in
+          // packages/tui/src/routes/session/question.tsx.
           const isElaboration = answers.some((a) => a?.some((v) => v === "[ELABORATE]"))
           if (isElaboration) {
             const optionSummary = params.questions

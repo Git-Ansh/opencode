@@ -71,9 +71,27 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
       ).catch(() => {})
     }
 
+    // Command frecency tracking (stored under a "cmd:" prefix in the same store/file
+    // as file frecency). Powers the "Recent" section of the command palette. Command
+    // names aren't filesystem paths, so unlike updateFrecency() above there's no
+    // path.resolve() and no MAX_FRECENCY_ENTRIES pruning — the command vocabulary is
+    // small (dozens, not thousands of entries).
+    function updateCommandFrecency(command: string) {
+      const key = `cmd:${command}`
+      const newEntry = { frequency: (store.data[key]?.frequency || 0) + 1, lastOpen: Date.now() }
+      setStore("data", key, newEntry)
+      appendText(frecencyPath, JSON.stringify({ path: key, ...newEntry }) + "\n").catch(() => {})
+    }
+
+    function getCommandFrecency(command: string): number {
+      return calculateFrecency(store.data[`cmd:${command}`])
+    }
+
     return {
       getFrecency: (filePath: string) => calculateFrecency(store.data[path.resolve(paths.cwd, filePath)]),
       updateFrecency,
+      getCommandFrecency,
+      updateCommandFrecency,
       data: () => store.data,
     }
   },
