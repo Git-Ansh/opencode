@@ -1,12 +1,26 @@
 import fs from "fs/promises"
 import path from "path"
-import { AppRuntime } from "@/effect/app-runtime"
 import { InstanceState } from "@/effect/instance-state"
 import { Git } from "@/git"
+import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 // Note(port): the original `util/log.ts` Log.create({service}) logger no longer
 // exists (logging moved to Effect's Logger under packages/core/src/observability),
 // and this module never actually logged anything, so the import is just dropped.
+//
+// Note(port): `@/effect/app-runtime` assembles the entire Effect DI graph, and
+// this module is reachable from *inside* that graph (session/llm/request.ts ->
+// session/system.ts -> here). A static top-level `import { AppRuntime }` would
+// close a circular-import loop back onto app-runtime.ts, throwing a "Cannot
+// access ... before initialization" TDZ error at worker-thread module-load
+// time. AppRuntime is only ever needed inside `gather()` (never at module
+// scope), so loading it lazily via dynamic import breaks the cycle.
+let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
+function getAppRuntime(): Promise<typeof AppRuntimeType> {
+  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
+  return appRuntimePromise
+}
+
 export namespace ContextInjection {
   const MAX_TOKENS = 4000
   const CHARS_PER_TOKEN = 4
@@ -18,6 +32,7 @@ export namespace ContextInjection {
   }
 
   export async function gather(): Promise<string[]> {
+    const AppRuntime = await getAppRuntime()
     const ctx = await AppRuntime.runPromise(InstanceState.context)
     // Non-git projects have worktree="/", avoid running git commands with cwd: "/"
     if (ctx.project.vcs !== "git") return []

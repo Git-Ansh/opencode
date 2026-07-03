@@ -1,11 +1,28 @@
 import { spawn } from "child_process"
 import { Effect, Stream } from "effect"
-import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionStatus } from "../session/status"
 import { Permission } from "../permission"
 import { Session } from "../session/session"
 import { Config } from "../config/config"
+import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
+
+// Note(port): this module is imported by project/bootstrap.ts, which sits
+// *inside* the Effect DI graph that `@/effect/app-runtime` assembles
+// (app-runtime.ts -> app-node-builder-v1.ts -> bootstrap.ts -> here). A
+// static top-level `import { AppRuntime }` closes a circular-import loop back
+// onto app-runtime.ts, which crashes module loading with "Cannot access
+// 'node' before initialization" (TDZ) when the graph is first pulled in from
+// a module like control-plane/workspace.ts. AppRuntime is only needed inside
+// `init()` (never at module scope), so load it lazily via dynamic import —
+// the same pattern upstream itself uses (cli/effect-cmd.ts,
+// control-plane/adapters/worktree.ts).
+let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
+function getAppRuntime(): Promise<typeof AppRuntimeType> {
+  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
+  return appRuntimePromise
+}
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
 // (packages/core/src/observability/logging.ts), not reachable from this plain
@@ -64,12 +81,19 @@ $n.Dispose()
     }
   }
 
-  export async function init(): Promise<void> {
+  // Accepts the already-resolved instance config from bootstrap. Config.get()
+  // is instance-scoped (requires InstanceRef), so re-fetching it here through
+  // a bare AppRuntime.runPromise dies with "InstanceRef not provided" — the
+  // caller (project/bootstrap.ts) runs inside instance context and passes the
+  // config in instead. The Config.Service fallback remains for any caller that
+  // does run inside instance context.
+  export async function init(config?: ConfigV1.Info): Promise<void> {
     if (initialized) return
     initialized = true
 
-    const config = await AppRuntime.runPromise(Config.Service.use((c) => c.get()))
-    const notifConfig = config.notifications
+    const AppRuntime = await getAppRuntime()
+    const resolved = config ?? (await AppRuntime.runPromise(Config.Service.use((c) => c.get())))
+    const notifConfig = resolved.notifications
     if (notifConfig?.enabled === false) return
 
     const subscriptions: Effect.Effect<void, never, EventV2Bridge.Service>[] = []

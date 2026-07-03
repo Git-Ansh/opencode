@@ -1,16 +1,30 @@
-import { AppRuntime } from "@/effect/app-runtime"
 import { Session } from "./session"
 import { SessionID } from "./schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "../provider/provider"
 import { Token } from "../util/token"
 import { ProviderTransform } from "../provider/transform"
+import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
 // (packages/core/src/observability/logging.ts), not reachable from this plain
 // async helper. Falls back to console.error.
 const log = {
   info: (message: string, extra?: Record<string, unknown>) => console.error(`[dcp] ${message}`, extra ?? ""),
+}
+
+// Note(port): `@/effect/app-runtime` assembles the entire Effect DI graph, and
+// this module is reachable from *inside* that graph (session/llm/request.ts
+// -> session/system.ts -> ... -> here, via the httpapi session handler's
+// static `DCP` import). A static top-level `import { AppRuntime }` here would
+// close a circular-import loop back onto app-runtime.ts, which throws a
+// "Cannot access ... before initialization" TDZ error at worker-thread
+// module-load time. AppRuntime is only ever needed inside `adapt()` (never at
+// module scope), so loading it lazily via dynamic import breaks the cycle.
+let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
+function getAppRuntime(): Promise<typeof AppRuntimeType> {
+  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
+  return appRuntimePromise
 }
 
 export namespace DCP {
@@ -34,6 +48,7 @@ export namespace DCP {
     sessionID: string
     model: Provider.Model
   }): Promise<Stats> {
+    const AppRuntime = await getAppRuntime()
     const msgs = await AppRuntime.runPromise(Session.use.messages({ sessionID: SessionID.make(input.sessionID) }))
     const contextLimit = input.model.limit.context
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)

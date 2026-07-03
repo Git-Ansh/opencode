@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
-import { AppRuntime } from "@/effect/app-runtime"
 import { InstanceState } from "@/effect/instance-state"
+import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
 // (packages/core/src/observability/logging.ts), which only wires up at the
@@ -13,8 +13,23 @@ const log = {
   },
 }
 
+// Note(port): `@/effect/app-runtime` assembles the entire Effect DI graph, and
+// this module is reachable from *inside* that graph (tool/memory.ts registers
+// as a tool in tool/registry.ts, which is itself part of the graph). A static
+// top-level `import { AppRuntime }` here would close a circular-import loop
+// back onto app-runtime.ts, throwing a "Cannot access ... before
+// initialization" TDZ error at worker-thread module-load time. AppRuntime is
+// only ever needed inside `directory()` (never at module scope), so loading
+// it lazily via dynamic import breaks the cycle.
+let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
+function getAppRuntime(): Promise<typeof AppRuntimeType> {
+  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
+  return appRuntimePromise
+}
+
 export namespace ProjectMemory {
   async function directory(): Promise<string> {
+    const AppRuntime = await getAppRuntime()
     return AppRuntime.runPromise(InstanceState.directory)
   }
 

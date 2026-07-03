@@ -50,7 +50,11 @@ const layer = Layer.effect(
       // src/notification/index.ts, src/telemetry/index.ts) that reach back into
       // the Effect world themselves via AppRuntime, so they're initialized here
       // as fire-and-forget calls rather than added to the `s.init()` list above.
-      yield* Effect.promise(() => Notification.init()).pipe(
+      // Config.get() is instance-scoped, so resolve it here (inside instance
+      // context) and hand it to Notification.init rather than letting init
+      // re-fetch it through a bare AppRuntime call (which lacks InstanceRef).
+      const cfg = yield* config.get()
+      yield* Effect.promise(() => Notification.init(cfg)).pipe(
         Effect.catchCause((cause) => Effect.logWarning("notification init failed", { cause })),
       )
       yield* Effect.sync(() => Telemetry.init())

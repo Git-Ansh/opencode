@@ -1,11 +1,49 @@
-import { Agent } from "./agent"
-import { Session } from "../session/session"
-import { SessionPrompt } from "../session/prompt"
 import { SessionID } from "../session/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { AppRuntime } from "@/effect/app-runtime"
+import type { Agent as AgentType } from "./agent"
+import type { Session as SessionType } from "../session/session"
+import type { SessionPrompt as SessionPromptType } from "../session/prompt"
+import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
+
+// Note(port): this module is reachable from *inside* the Effect DI graph that
+// `@/effect/app-runtime` assembles (tool/registry.ts -> tool/orchestrate.ts ->
+// this file), while also needing to reach back into that same graph (Agent,
+// Session, SessionPrompt, AppRuntime) to do its work. Static top-level imports
+// of any of those four therefore close a circular-import loop back onto
+// whichever of those modules is still mid-evaluation, which throws a "Cannot
+// access ... before initialization" TDZ error at worker-thread module-load
+// time. None of the four are ever needed at module scope (only inside the
+// async functions below), so loading them lazily via dynamic import — after
+// the whole graph has already finished its module-level evaluation — breaks
+// the cycle without changing any runtime behavior. Same escape hatch other
+// legacy Promise/async-local-storage callers use for AppRuntime itself (see
+// project/instance-runtime.ts), just applied to every graph-reaching import
+// here since this file uniquely sits on both sides of the graph boundary.
+let dependenciesPromise:
+  | Promise<{
+      Agent: typeof AgentType
+      Session: typeof SessionType
+      SessionPrompt: typeof SessionPromptType
+      AppRuntime: typeof AppRuntimeType
+    }>
+  | undefined
+function getDependencies() {
+  if (!dependenciesPromise)
+    dependenciesPromise = Promise.all([
+      import("./agent"),
+      import("../session/session"),
+      import("../session/prompt"),
+      import("@/effect/app-runtime"),
+    ]).then(([agent, session, sessionPrompt, appRuntime]) => ({
+      Agent: agent.Agent,
+      Session: session.Session,
+      SessionPrompt: sessionPrompt.SessionPrompt,
+      AppRuntime: appRuntime.AppRuntime,
+    }))
+  return dependenciesPromise
+}
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
 // (packages/core/src/observability/logging.ts), not reachable from this plain
@@ -61,6 +99,7 @@ export namespace Orchestrator {
 
   async function spawnAgent(spec: TaskSpec, parentID: string, model: { providerID: string; modelID: string }, abort: AbortSignal): Promise<Result> {
     const start = Date.now()
+    const { Agent, Session, SessionPrompt, AppRuntime } = await getDependencies()
     const agent = await AppRuntime.runPromise(Agent.Service.use((a) => a.get(spec.agent)))
     if (!agent) {
       return {
