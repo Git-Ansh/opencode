@@ -68,6 +68,7 @@ import { createTuiApiAdapters } from "./plugin/adapters"
 import { createTuiApi } from "./plugin/api"
 import { createPluginRuntime, PluginRuntimeProvider, usePluginRuntime, type TuiPluginHost } from "./plugin/runtime"
 import { CommandPaletteDialog } from "./component/command-palette"
+import { HelpOverlay } from "./routes/session/help-overlay"
 import {
   COMMAND_PALETTE_COMMAND,
   OPENCODE_BASE_MODE,
@@ -119,6 +120,7 @@ const appBindingCommands = [
   "theme.switch_mode",
   "theme.mode.lock",
   "help.show",
+  "help.overlay",
   "docs.open",
   "diff.open",
   "workspace.list",
@@ -304,8 +306,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                   <ThemeProvider mode={mode}>
                                                     <LocalProvider>
                                                       <PromptStashProvider>
-                                                        <DialogProvider>
-                                                          <FrecencyProvider>
+                                                        <FrecencyProvider>
+                                                          <DialogProvider>
                                                             <PromptHistoryProvider>
                                                               <PromptRefProvider>
                                                                 <EditorContextProvider>
@@ -318,8 +320,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                                 </EditorContextProvider>
                                                               </PromptRefProvider>
                                                             </PromptHistoryProvider>
-                                                          </FrecencyProvider>
-                                                        </DialogProvider>
+                                                          </DialogProvider>
+                                                        </FrecencyProvider>
                                                       </PromptStashProvider>
                                                     </LocalProvider>
                                                   </ThemeProvider>
@@ -439,6 +441,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
 
     renderer.clearSelection()
   }
+  // Keybinding cheat-sheet overlay (port feature). Registered at app level so
+  // Ctrl+G works on the home screen as well as inside sessions.
+  const [helpOverlayVisible, setHelpOverlayVisible] = createSignal(false)
+
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
   const [pasteSummaryEnabled, setPasteSummaryEnabled] = createSignal(
     kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary),
@@ -802,6 +808,17 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         category: "System",
       },
       {
+        name: "help.overlay",
+        title: helpOverlayVisible() ? "Hide keybinding overlay" : "Show keybinding overlay",
+        slashName: "shortcuts",
+        slashAliases: ["keybinds"],
+        run: () => {
+          setHelpOverlayVisible((prev) => !prev)
+          dialog.clear()
+        },
+        category: "System",
+      },
+      {
         name: "docs.open",
         title: "Open docs",
         run: () => {
@@ -968,6 +985,19 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
   }))
 
+  useBindings(() => ({
+    enabled: helpOverlayVisible(),
+    priority: 1,
+    bindings: [
+      {
+        key: "escape",
+        desc: "Close keybinding overlay",
+        group: "Help",
+        cmd: () => setHelpOverlayVisible(false),
+      },
+    ],
+  }))
+
   event.on("tui.command.execute", (evt, { workspace }) => {
     if (workspace !== project.workspace.current()) return
     keymap.dispatchCommand(evt.properties.command)
@@ -1111,6 +1141,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           <pluginRuntime.Slot name="app_bottom" />
         </box>
         <pluginRuntime.Slot name="app" />
+        <Show when={helpOverlayVisible()}>
+          <HelpOverlay onClose={() => setHelpOverlayVisible(false)} />
+        </Show>
       </Show>
       <Show when={!startup.skipInitialLoading}>
         <StartupLoading ready={ready} />

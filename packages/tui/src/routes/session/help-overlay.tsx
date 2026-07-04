@@ -9,7 +9,7 @@ interface HelpSection {
 
 const SECTIONS: HelpSection[] = [
   {
-    title: "Sidebar",
+    title: "Sidebar (session)",
     items: [
       { keys: "Ctrl+L", label: "Toggle sidebar" },
       { keys: "Ctrl+Y", label: "Cycle sidebar tabs (Info / Project)" },
@@ -18,18 +18,18 @@ const SECTIONS: HelpSection[] = [
     ],
   },
   {
-    title: "Split Pane",
+    title: "Split Pane (session)",
     items: [
       { keys: "Ctrl+B", label: "Toggle split pane" },
-      { keys: "Ctrl+Q", label: "Cycle tabs (Agents / Terminal / Files)" },
-      { keys: "Ctrl+1/2/3", label: "Jump to specific tab" },
-      { keys: "Ctrl+W", label: "Toggle list view in pane" },
-      { keys: "Ctrl+F", label: "Cycle filter" },
-      { keys: "Ctrl+↑↓", label: "Navigate list items" },
+      { keys: "Ctrl+Q", label: "Cycle tabs (Agents / Terminal / Files / Plan)" },
+      { keys: "Ctrl+1..4", label: "Jump to tab (Agents / Terminal / Files / Plan)" },
       { keys: "Ctrl+←→", label: "Resize pane" },
-      { keys: "Ctrl+E", label: "Open file in editor" },
+      { keys: "Ctrl+↑↓", label: "Navigate list items" },
       { keys: "Ctrl+O", label: "Close opened file (Files view)" },
-      { keys: "Ctrl+K", label: "Kill selected sub-agent / terminal" },
+      { keys: "Ctrl+W", label: "Toggle list view (prompt unfocused)" },
+      { keys: "Ctrl+F", label: "Cycle filter (prompt unfocused)" },
+      { keys: "Ctrl+E", label: "Open file in editor (prompt unfocused)" },
+      { keys: "Ctrl+K", label: "Kill sub-agent / terminal (prompt unfocused)" },
     ],
   },
   {
@@ -48,6 +48,8 @@ const SECTIONS: HelpSection[] = [
   {
     title: "General",
     items: [
+      { keys: "Ctrl+P", label: "Command palette" },
+      { keys: "Ctrl+X", label: "Leader key (then b sidebar, m models, ...)" },
       { keys: "Ctrl+G", label: "Toggle this help" },
       { keys: "Esc", label: "Close this help" },
     ],
@@ -67,6 +69,7 @@ export function HelpOverlay(props: { onClose: () => void }) {
       height={dimensions().height}
       justifyContent="center"
       alignItems="center"
+      zIndex={2900}
       onMouseDown={() => props.onClose()}
     >
       <box

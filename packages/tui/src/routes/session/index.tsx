@@ -40,7 +40,7 @@ import type {
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
@@ -53,13 +53,12 @@ import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
-import { Sidebar } from "./sidebar"
-import { SplitPane, type SecondaryMode } from "./split-pane"
+import { Sidebar, type SidebarTab } from "./sidebar"
+import { SplitPane, SPLIT_TABS, type SecondaryMode } from "./split-pane"
 import { TerminalView } from "./terminal-view"
 import { AgentsView } from "./agents-view"
 import { DiffView } from "./diff-view"
 import { PlanReview, parsePlanSteps, type PlanStep } from "./plan-review"
-import { HelpOverlay } from "./help-overlay"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -147,6 +146,16 @@ const sessionBindingCommands = [
   "session.parent",
   "session.child.next",
   "session.child.previous",
+  // Port: split pane + sidebar tab bindings (defaults in config/keybind.ts).
+  "session.sidebar.tab.toggle",
+  "session.split.toggle",
+  "session.split.tab.cycle",
+  "session.split.tab.1",
+  "session.split.tab.2",
+  "session.split.tab.3",
+  "session.split.tab.4",
+  "session.split.grow",
+  "session.split.shrink",
 ] as const
 
 const sessionGlobalBindingCommands = [
@@ -254,6 +263,7 @@ export function Session() {
   const dimensions = useTerminalDimensions()
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
+  const [sidebarTab, setSidebarTab] = createSignal<SidebarTab>("info")
   const [conceal, setConceal] = createSignal(true)
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
@@ -476,30 +486,10 @@ export function Session() {
     })
   })
 
-  // Ctrl+L to toggle sidebar
-  useKeyboard((evt) => {
-    if (evt.ctrl && evt.name === "l") {
-      evt.preventDefault()
-      const isVisible = sidebarVisible()
-      setSidebar(() => (isVisible ? "hide" : "auto"))
-      setSidebarOpen(!isVisible)
-    }
-  })
-
-  const [helpVisible, setHelpVisible] = createSignal(false)
-
-  // Ctrl+G to toggle help overlay; Esc to dismiss
-  useKeyboard((evt) => {
-    if (evt.ctrl && evt.name === "g") {
-      evt.preventDefault()
-      setHelpVisible((v) => !v)
-      return
-    }
-    if (helpVisible() && evt.name === "escape") {
-      evt.preventDefault()
-      setHelpVisible(false)
-    }
-  })
+  // Sidebar toggle (ctrl+l / <leader>b) is the upstream "session.sidebar.toggle"
+  // keymap command; the help overlay (ctrl+g) is the app-level "help.overlay"
+  // command (see app.tsx). Raw useKeyboard handlers were removed because keys
+  // that the keymap layer has bindings for never reach useKeyboard listeners.
 
   // Helper: Find next visible message boundary in direction
   const findNextVisibleMessage = (direction: "next" | "prev"): string | null => {
@@ -1283,6 +1273,7 @@ export function Session() {
             setSidebar(() => "auto")
             setSidebarOpen(true)
           }
+          setSidebarTab("files")
         })
         dialog.clear()
       },
@@ -1333,6 +1324,79 @@ export function Session() {
       },
       run: () => {
         setSplitMode("none")
+        dialog.clear()
+      },
+    },
+    {
+      title: splitMode() === "none" ? "Open split pane" : "Close split pane",
+      value: "session.split.toggle",
+      category: "Split Pane",
+      slash: {
+        name: "split",
+      },
+      run: () => {
+        setSplitMode(splitMode() === "none" ? lastSplitTab() : "none")
+        dialog.clear()
+      },
+    },
+    {
+      title: "Next split pane tab",
+      value: "session.split.tab.cycle",
+      category: "Split Pane",
+      hidden: true,
+      enabled: splitMode() !== "none",
+      run: () => {
+        if (splitMode() === "none") return
+        const visible = SPLIT_TABS.filter((tab) => tab.mode !== "agents" || hasAgents())
+        const current = visible.findIndex((tab) => tab.mode === splitMode())
+        const next = visible[(current + 1) % visible.length]
+        if (next) setSplitMode(next.mode)
+      },
+    },
+    ...SPLIT_TABS.map((tab, index) => ({
+      title: `Split pane: ${tab.label}`,
+      value: `session.split.tab.${index + 1}`,
+      category: "Split Pane",
+      hidden: true,
+      run: () => {
+        if (tab.mode === "agents" && !hasAgents()) return
+        setSplitMode(tab.mode)
+      },
+    })),
+    {
+      title: "Grow transcript side of split pane",
+      value: "session.split.grow",
+      category: "Split Pane",
+      hidden: true,
+      enabled: splitMode() !== "none",
+      run: () => {
+        if (splitMode() === "none") return
+        setSplitRatio((prev) => Math.min(0.8, prev + 0.05))
+      },
+    },
+    {
+      title: "Shrink transcript side of split pane",
+      value: "session.split.shrink",
+      category: "Split Pane",
+      hidden: true,
+      enabled: splitMode() !== "none",
+      run: () => {
+        if (splitMode() === "none") return
+        setSplitRatio((prev) => Math.max(0.2, prev - 0.05))
+      },
+    },
+    {
+      title: sidebarTab() === "info" ? "Show project files in sidebar" : "Show session info in sidebar",
+      value: "session.sidebar.tab.toggle",
+      category: "Session",
+      run: () => {
+        batch(() => {
+          if (!sidebarVisible()) {
+            setSidebar(() => "auto")
+            setSidebarOpen(true)
+          }
+          setSidebarTab((prev) => (prev === "info" ? "files" : "info"))
+        })
         dialog.clear()
       },
     },
@@ -1731,6 +1795,8 @@ export function Session() {
                     setSplitMode("files")
                   }}
                   splitPaneActive={splitMode() !== "none"}
+                  tab={sidebarTab()}
+                  setTab={setSidebarTab}
                 />
               </Match>
               <Match when={!wide()}>
@@ -1750,13 +1816,12 @@ export function Session() {
                       setSplitMode("files")
                     }}
                     splitPaneActive={splitMode() !== "none"}
+                    tab={sidebarTab()}
+                    setTab={setSidebarTab}
                   />
                 </box>
               </Match>
             </Switch>
-          </Show>
-          <Show when={helpVisible()}>
-            <HelpOverlay onClose={() => setHelpVisible(false)} />
           </Show>
         </box>
       </context.Provider>

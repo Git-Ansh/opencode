@@ -1,24 +1,28 @@
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
-import { createMemo, createSignal, Show, Switch, Match } from "solid-js"
+import { createMemo, Show, Switch, Match } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { usePluginRuntime } from "../../plugin/runtime"
-import { useKeyboard } from "@opentui/solid"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
 import { ProgressDashboard } from "../../component/progress-dashboard"
 import { FileTree } from "../../component/file-tree"
 
-type SidebarTab = "info" | "files"
+export type SidebarTab = "info" | "files"
 
+// Tab state lives in routes/session/index.tsx (owned by the session route so the
+// ctrl+y keymap command "session.sidebar.tab.toggle" can flip it even while this
+// component is hidden) and is passed in as props.
 export function Sidebar(props: {
   sessionID: string
   overlay?: boolean
   onFileSelect?: (filepath: string) => void
   splitPaneActive?: boolean
+  tab: SidebarTab
+  setTab: (tab: SidebarTab) => void
 }) {
   const pluginRuntime = usePluginRuntime()
   const project = useProject()
@@ -34,15 +38,8 @@ export function Sidebar(props: {
   }
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
 
-  const [tab, setTab] = createSignal<SidebarTab>("info")
-
-  // Ctrl+Y to cycle sidebar tabs (Info / Project file tree)
-  useKeyboard((evt) => {
-    if (evt.ctrl && evt.name === "y") {
-      evt.preventDefault()
-      setTab((t) => (t === "info" ? "files" : "info"))
-    }
-  })
+  const tab = () => props.tab
+  const setTab = (value: SidebarTab) => props.setTab(value)
 
   return (
     <Show when={session()}>
