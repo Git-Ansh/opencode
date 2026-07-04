@@ -1,7 +1,5 @@
 import fs from "fs/promises"
 import path from "path"
-import { InstanceState } from "@/effect/instance-state"
-import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
 // (packages/core/src/observability/logging.ts), which only wires up at the
@@ -13,32 +11,21 @@ const log = {
   },
 }
 
-// Note(port): `@/effect/app-runtime` assembles the entire Effect DI graph, and
-// this module is reachable from *inside* that graph (tool/memory.ts registers
-// as a tool in tool/registry.ts, which is itself part of the graph). A static
-// top-level `import { AppRuntime }` here would close a circular-import loop
-// back onto app-runtime.ts, throwing a "Cannot access ... before
-// initialization" TDZ error at worker-thread module-load time. AppRuntime is
-// only ever needed inside `directory()` (never at module scope), so loading
-// it lazily via dynamic import breaks the cycle.
-let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
-function getAppRuntime(): Promise<typeof AppRuntimeType> {
-  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
-  return appRuntimePromise
-}
-
+// Note(port): this module used to resolve the project directory itself via
+// `AppRuntime.runPromise(InstanceState.directory)`. That escape hatch runs the
+// effect on the GLOBAL runtime, where the per-request InstanceRef context is
+// not present, so every call died with "InstanceRef not provided" even when
+// the original caller was inside an instance context. Callers (tool/memory.ts,
+// session/prompt.ts) all run in Effect land inside the instance context, so
+// they resolve `InstanceState.directory` there and pass it in as a plain
+// argument instead — same fix as Notification.init(cfg) in project/bootstrap.ts.
 export namespace ProjectMemory {
-  async function directory(): Promise<string> {
-    const AppRuntime = await getAppRuntime()
-    return AppRuntime.runPromise(InstanceState.directory)
+  function memoryDir(directory: string): string {
+    return path.join(directory, ".opencode", "memory")
   }
 
-  async function memoryDir(): Promise<string> {
-    return path.join(await directory(), ".opencode", "memory")
-  }
-
-  async function ensureDir(): Promise<string> {
-    const dir = await memoryDir()
+  async function ensureDir(directory: string): Promise<string> {
+    const dir = memoryDir(directory)
     await fs.mkdir(dir, { recursive: true })
     return dir
   }
@@ -49,17 +36,17 @@ export namespace ProjectMemory {
     return path.join(dir, `${safe}.md`)
   }
 
-  export async function save(key: string, content: string): Promise<void> {
-    const dir = await ensureDir()
+  export async function save(directory: string, key: string, content: string): Promise<void> {
+    const dir = await ensureDir(directory)
     const filePath = keyToFile(dir, key)
     const header = `# ${key}\n_Updated: ${new Date().toISOString()}_\n\n`
     await fs.writeFile(filePath, header + content, "utf-8")
     log.info("saved memory", { key })
   }
 
-  export async function get(key: string): Promise<string | undefined> {
+  export async function get(directory: string, key: string): Promise<string | undefined> {
     try {
-      const dir = await memoryDir()
+      const dir = memoryDir(directory)
       const content = await fs.readFile(keyToFile(dir, key), "utf-8")
       return content
     } catch {
@@ -67,17 +54,17 @@ export namespace ProjectMemory {
     }
   }
 
-  export async function remove(key: string): Promise<void> {
+  export async function remove(directory: string, key: string): Promise<void> {
     try {
-      const dir = await memoryDir()
+      const dir = memoryDir(directory)
       await fs.unlink(keyToFile(dir, key))
     } catch {
       // ignore if not exists
     }
   }
 
-  export async function list(): Promise<{ key: string; summary: string }[]> {
-    const dir = await ensureDir()
+  export async function list(directory: string): Promise<{ key: string; summary: string }[]> {
+    const dir = await ensureDir(directory)
     const files = await fs.readdir(dir).catch(() => [])
     const result: { key: string; summary: string }[] = []
 
@@ -99,8 +86,8 @@ export namespace ProjectMemory {
     return result
   }
 
-  export async function search(query: string): Promise<{ key: string; content: string }[]> {
-    const dir = await ensureDir()
+  export async function search(directory: string, query: string): Promise<{ key: string; content: string }[]> {
+    const dir = await ensureDir(directory)
     const files = await fs.readdir(dir).catch(() => [])
     const results: { key: string; content: string; score: number }[] = []
     const terms = query

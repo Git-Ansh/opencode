@@ -1,9 +1,12 @@
+import { Effect } from "effect"
 import { Session } from "./session"
 import { SessionID } from "./schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "../provider/provider"
 import { Token } from "../util/token"
 import { ProviderTransform } from "../provider/transform"
+import { InstanceRef } from "@/effect/instance-ref"
+import type { InstanceContext } from "@/project/instance-context"
 import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 // TODO(port): util/log.ts no longer exists — logging moved to Effect's Logger
@@ -47,9 +50,21 @@ export namespace DCP {
   export async function adapt(input: {
     sessionID: string
     model: Provider.Model
+    /**
+     * Instance context resolved by the Effect-side caller (the httpapi session
+     * handler runs inside the instance context). AppRuntime.runPromise runs on
+     * the GLOBAL runtime whose fibers lack the per-request InstanceRef, so it
+     * must be re-provided explicitly here — same pattern as
+     * control-plane/adapters/worktree.ts.
+     */
+    instance: InstanceContext
   }): Promise<Stats> {
     const AppRuntime = await getAppRuntime()
-    const msgs = await AppRuntime.runPromise(Session.use.messages({ sessionID: SessionID.make(input.sessionID) }))
+    const withInstance = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(Effect.provideService(InstanceRef, input.instance))
+    const msgs = await AppRuntime.runPromise(
+      withInstance(Session.use.messages({ sessionID: SessionID.make(input.sessionID) })),
+    )
     const contextLimit = input.model.limit.context
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const target = Math.floor((contextLimit - maxOutput) * 0.85)
@@ -103,7 +118,7 @@ export namespace DCP {
     for (const entry of toPrune) {
       if (entry.part.type === "tool" && entry.part.state.status === "completed") {
         entry.part.state.time.compacted = Date.now()
-        await AppRuntime.runPromise(Session.use.updatePart(entry.part))
+        await AppRuntime.runPromise(withInstance(Session.use.updatePart(entry.part)))
       }
     }
 

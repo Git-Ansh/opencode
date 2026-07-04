@@ -1,6 +1,4 @@
-import { InstanceState } from "@/effect/instance-state"
 import path from "path"
-import type { AppRuntime as AppRuntimeType } from "@/effect/app-runtime"
 
 import MOD_TYPESCRIPT from "./modules/typescript.txt"
 import MOD_PYTHON from "./modules/python.txt"
@@ -11,19 +9,14 @@ import MOD_DEBUGGING from "./modules/debugging.txt"
 import MOD_REFACTORING from "./modules/refactoring.txt"
 import MOD_TESTING from "./modules/testing.txt"
 
-// Note(port): `@/effect/app-runtime` assembles the entire Effect DI graph, and
-// this module is reachable from *inside* that graph (session/llm/request.ts ->
-// session/system.ts -> here). A static top-level `import { AppRuntime }` would
-// close a circular-import loop back onto app-runtime.ts, throwing a "Cannot
-// access ... before initialization" TDZ error at worker-thread module-load
-// time. AppRuntime is only ever needed inside `detect()` (never at module
-// scope), so loading it lazily via dynamic import breaks the cycle.
-let appRuntimePromise: Promise<typeof AppRuntimeType> | undefined
-function getAppRuntime(): Promise<typeof AppRuntimeType> {
-  if (!appRuntimePromise) appRuntimePromise = import("@/effect/app-runtime").then((m) => m.AppRuntime)
-  return appRuntimePromise
-}
-
+// Note(port): this module used to resolve the project worktree itself via
+// `AppRuntime.runPromise(InstanceState.context)`. That escape hatch runs the
+// effect on the GLOBAL runtime, where the per-request InstanceRef context is
+// not present, so every call died with "InstanceRef not provided" even when
+// the original caller was inside an instance context. The caller
+// (session/system.ts `adaptive`) runs in Effect land inside the instance
+// context, so it resolves the worktree there and passes it in as a plain
+// argument — same fix as Notification.init(cfg) in project/bootstrap.ts.
 export namespace AdaptivePrompt {
   interface ProjectInfo {
     languages: string[]
@@ -32,10 +25,8 @@ export namespace AdaptivePrompt {
 
   const cache = new Map<string, ProjectInfo>()
 
-  export async function detect(): Promise<ProjectInfo> {
-    const AppRuntime = await getAppRuntime()
-    const ctx = await AppRuntime.runPromise(InstanceState.context)
-    const dir = ctx.worktree
+  export async function detect(worktree: string): Promise<ProjectInfo> {
+    const dir = worktree
     const cached = cache.get(dir)
     if (cached) return cached
 
@@ -101,8 +92,8 @@ export namespace AdaptivePrompt {
     return undefined
   }
 
-  export async function compose(recentMessages: string[]): Promise<string[]> {
-    const project = await detect()
+  export async function compose(worktree: string, recentMessages: string[]): Promise<string[]> {
+    const project = await detect(worktree)
     const task = classifyTask(recentMessages)
     const parts: string[] = []
 

@@ -1,5 +1,6 @@
 import { Schema, Effect } from "effect"
 import * as Tool from "./tool"
+import { InstanceState } from "@/effect/instance-state"
 import { Orchestrator } from "../agent/orchestrator"
 import { Session } from "../session/session"
 import { MessageV2 } from "../session/message-v2"
@@ -55,6 +56,13 @@ export const OrchestrateTool = Tool.define(
             return yield* provider.defaultModel()
           })
 
+          // Orchestrator is a plain-Promise module that bridges back into the
+          // Effect world via the global AppRuntime, whose fibers lack the
+          // per-request InstanceRef — resolve the instance context here (this
+          // execute body runs inside it) and thread it in so Orchestrator can
+          // re-provide it on every bridged effect.
+          const instance = yield* InstanceState.context
+
           const results = yield* Effect.promise(() =>
             Orchestrator.execute({
               strategy: params.strategy,
@@ -62,6 +70,7 @@ export const OrchestrateTool = Tool.define(
               sessionID: ctx.sessionID,
               model,
               abort: ctx.abort,
+              instance,
             }),
           )
 

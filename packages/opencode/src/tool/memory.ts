@@ -1,5 +1,6 @@
 import { Schema, Effect } from "effect"
 import * as Tool from "./tool"
+import { InstanceState } from "@/effect/instance-state"
 import { ProjectMemory } from "../session/project-memory"
 
 const SaveParameters = Schema.Struct({
@@ -27,6 +28,11 @@ Memories are stored in .opencode/memory/ as markdown files.`,
     parameters: SaveParameters,
     execute: (params: Schema.Schema.Type<typeof SaveParameters>, ctx: Tool.Context) =>
       Effect.gen(function* () {
+        // Resolve the instance directory here (inside instance context) and pass
+        // it into the plain-Promise module — ProjectMemory must not reach back
+        // into the Effect world itself (see note in session/project-memory.ts).
+        const directory = yield* InstanceState.directory
+
         yield* ctx.ask({
           permission: "edit",
           patterns: [`.opencode/memory/${params.key}.md`],
@@ -34,7 +40,7 @@ Memories are stored in .opencode/memory/ as markdown files.`,
           metadata: { key: params.key },
         })
 
-        yield* Effect.promise(() => ProjectMemory.save(params.key, params.content))
+        yield* Effect.promise(() => ProjectMemory.save(directory, params.key, params.content))
 
         return {
           title: `Saved memory: ${params.key}`,
@@ -56,45 +62,48 @@ export const MemoryReadTool = Tool.define(
     description: `Read a specific project memory by key, or search memories by query.`,
     parameters: ReadParameters,
     execute: (params: Schema.Schema.Type<typeof ReadParameters>) =>
-      Effect.promise(async () => {
-        if (params.key) {
-          const content = await ProjectMemory.get(params.key)
-          if (!content) {
+      Effect.gen(function* () {
+        const directory = yield* InstanceState.directory
+        return yield* Effect.promise(async () => {
+          if (params.key) {
+            const content = await ProjectMemory.get(directory, params.key)
+            if (!content) {
+              return {
+                title: `Memory not found: ${params.key}`,
+                metadata: {} as Record<string, any>,
+                output: `No memory found with key "${params.key}". Use memory_list to see all available memories.`,
+              }
+            }
             return {
-              title: `Memory not found: ${params.key}`,
-              metadata: {} as Record<string, any>,
-              output: `No memory found with key "${params.key}". Use memory_list to see all available memories.`,
+              title: `Memory: ${params.key}`,
+              metadata: { key: params.key },
+              output: content,
             }
           }
-          return {
-            title: `Memory: ${params.key}`,
-            metadata: { key: params.key },
-            output: content,
-          }
-        }
 
-        if (params.query) {
-          const results = await ProjectMemory.search(params.query)
-          if (results.length === 0) {
+          if (params.query) {
+            const results = await ProjectMemory.search(directory, params.query)
+            if (results.length === 0) {
+              return {
+                title: "No memories found",
+                metadata: {} as Record<string, any>,
+                output: `No memories matched query "${params.query}".`,
+              }
+            }
+            const output = results.map((r) => `## ${r.key}\n${r.content}`).join("\n\n---\n\n")
             return {
-              title: "No memories found",
+              title: `${results.length} memory match(es)`,
               metadata: {} as Record<string, any>,
-              output: `No memories matched query "${params.query}".`,
+              output,
             }
           }
-          const output = results.map((r) => `## ${r.key}\n${r.content}`).join("\n\n---\n\n")
+
           return {
-            title: `${results.length} memory match(es)`,
+            title: "memory_read",
             metadata: {} as Record<string, any>,
-            output,
+            output: "Provide either a 'key' to read a specific memory or a 'query' to search.",
           }
-        }
-
-        return {
-          title: "memory_read",
-          metadata: {} as Record<string, any>,
-          output: "Provide either a 'key' to read a specific memory or a 'query' to search.",
-        }
+        })
       }),
   }),
 )
@@ -107,8 +116,9 @@ export const MemoryListTool = Tool.define(
     description: `List all project memories stored in .opencode/memory/.`,
     parameters: ListParameters,
     execute: (_params: Schema.Schema.Type<typeof ListParameters>) =>
-      Effect.promise(async () => {
-        const memories = await ProjectMemory.list()
+      Effect.gen(function* () {
+        const directory = yield* InstanceState.directory
+        const memories = yield* Effect.promise(() => ProjectMemory.list(directory))
         if (memories.length === 0) {
           return {
             title: "No memories",

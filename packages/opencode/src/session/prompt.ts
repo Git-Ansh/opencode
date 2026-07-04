@@ -1316,8 +1316,8 @@ const layer = Layer.effect(
             // no .opencode/memory/ to search relative to a real project root.
             const memories =
               ctx.worktree !== "/"
-                ? yield* Effect.promise(() => ProjectMemory.search(recentTexts.join(" ").slice(0, 500))).pipe(
-                    Effect.catch(() => Effect.succeed([])),
+                ? yield* Effect.promise(() => ProjectMemory.search(ctx.directory, recentTexts.join(" ").slice(0, 500))).pipe(
+                    Effect.catchCause(() => Effect.succeed([])),
                   )
                 : []
 

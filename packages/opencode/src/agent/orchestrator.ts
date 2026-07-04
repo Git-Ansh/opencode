@@ -1,7 +1,10 @@
+import { Effect } from "effect"
 import { SessionID } from "../session/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { InstanceRef } from "@/effect/instance-ref"
+import type { InstanceContext } from "@/project/instance-context"
 import type { Agent as AgentType } from "./agent"
 import type { Session as SessionType } from "../session/session"
 import type { SessionPrompt as SessionPromptType } from "../session/prompt"
@@ -78,13 +81,23 @@ export namespace Orchestrator {
     duration: number
   }
 
-  export async function execute(input: {
+  export interface ExecuteInput {
     strategy: Strategy
     tasks: TaskSpec[]
     sessionID: string
     model: { providerID: string; modelID: string }
     abort: AbortSignal
-  }): Promise<Result[]> {
+    /**
+     * Instance context resolved by the Effect-side caller (tool/orchestrate.ts
+     * execute runs inside the instance context). AppRuntime.runPromise runs on
+     * the GLOBAL runtime whose fibers lack the per-request InstanceRef, so it
+     * must be re-provided explicitly on every bridged effect below — same
+     * pattern as control-plane/adapters/worktree.ts.
+     */
+    instance: InstanceContext
+  }
+
+  export async function execute(input: ExecuteInput): Promise<Result[]> {
     switch (input.strategy) {
       case "parallel":
         return parallel(input)
@@ -97,10 +110,18 @@ export namespace Orchestrator {
     }
   }
 
-  async function spawnAgent(spec: TaskSpec, parentID: string, model: { providerID: string; modelID: string }, abort: AbortSignal): Promise<Result> {
+  async function spawnAgent(
+    spec: TaskSpec,
+    parentID: string,
+    model: { providerID: string; modelID: string },
+    abort: AbortSignal,
+    instance: InstanceContext,
+  ): Promise<Result> {
     const start = Date.now()
     const { Agent, Session, SessionPrompt, AppRuntime } = await getDependencies()
-    const agent = await AppRuntime.runPromise(Agent.Service.use((a) => a.get(spec.agent)))
+    const withInstance = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(Effect.provideService(InstanceRef, instance))
+    const agent = await AppRuntime.runPromise(withInstance(Agent.Service.use((a) => a.get(spec.agent))))
     if (!agent) {
       return {
         agent: spec.agent,
@@ -124,27 +145,31 @@ export namespace Orchestrator {
       }
 
       const session = await AppRuntime.runPromise(
-        Session.use.create({
-          parentID: SessionID.make(parentID),
-          title: `${spec.description} (@${spec.agent} subagent)`,
-        }),
-      )
-
-      await AppRuntime.runPromise(
-        SessionPrompt.Service.use((sessionPrompt) =>
-          sessionPrompt.prompt({
-            sessionID: session.id,
-            agent: spec.agent,
-            model: {
-              providerID: ProviderV2.ID.make(finalModel.providerID),
-              modelID: ModelV2.ID.make(finalModel.modelID),
-            },
-            parts: [{ type: "text", text: spec.prompt }],
+        withInstance(
+          Session.use.create({
+            parentID: SessionID.make(parentID),
+            title: `${spec.description} (@${spec.agent} subagent)`,
           }),
         ),
       )
 
-      const msgs = await AppRuntime.runPromise(Session.use.messages({ sessionID: session.id }))
+      await AppRuntime.runPromise(
+        withInstance(
+          SessionPrompt.Service.use((sessionPrompt) =>
+            sessionPrompt.prompt({
+              sessionID: session.id,
+              agent: spec.agent,
+              model: {
+                providerID: ProviderV2.ID.make(finalModel.providerID),
+                modelID: ModelV2.ID.make(finalModel.modelID),
+              },
+              parts: [{ type: "text", text: spec.prompt }],
+            }),
+          ),
+        ),
+      )
+
+      const msgs = await AppRuntime.runPromise(withInstance(Session.use.messages({ sessionID: session.id })))
       const lastAssistant = msgs
         .filter((m) => m.info.role === "assistant")
         .pop()
@@ -172,25 +197,17 @@ export namespace Orchestrator {
     }
   }
 
-  async function parallel(input: {
-    tasks: TaskSpec[]
-    sessionID: string
-    model: { providerID: string; modelID: string }
-    abort: AbortSignal
-  }): Promise<Result[]> {
+  type StrategyInput = Omit<ExecuteInput, "strategy">
+
+  async function parallel(input: StrategyInput): Promise<Result[]> {
     log.info("parallel", { count: input.tasks.length })
     const results = await Promise.all(
-      input.tasks.map((task) => spawnAgent(task, input.sessionID, input.model, input.abort)),
+      input.tasks.map((task) => spawnAgent(task, input.sessionID, input.model, input.abort, input.instance)),
     )
     return results
   }
 
-  async function pipeline(input: {
-    tasks: TaskSpec[]
-    sessionID: string
-    model: { providerID: string; modelID: string }
-    abort: AbortSignal
-  }): Promise<Result[]> {
+  async function pipeline(input: StrategyInput): Promise<Result[]> {
     log.info("pipeline", { count: input.tasks.length })
     const results: Result[] = []
     let prev = ""
@@ -199,7 +216,7 @@ export namespace Orchestrator {
       const prompt = prev
         ? `Previous agent output:\n<previous_output>\n${prev}\n</previous_output>\n\n${task.prompt}`
         : task.prompt
-      const result = await spawnAgent({ ...task, prompt }, input.sessionID, input.model, input.abort)
+      const result = await spawnAgent({ ...task, prompt }, input.sessionID, input.model, input.abort, input.instance)
       results.push(result)
       prev = result.output
       if (result.status === "error") break
@@ -208,12 +225,7 @@ export namespace Orchestrator {
     return results
   }
 
-  async function mapReduce(input: {
-    tasks: TaskSpec[]
-    sessionID: string
-    model: { providerID: string; modelID: string }
-    abort: AbortSignal
-  }): Promise<Result[]> {
+  async function mapReduce(input: StrategyInput): Promise<Result[]> {
     log.info("map-reduce", { count: input.tasks.length })
     // Map phase: run all tasks in parallel
     const mapped = await parallel(input)
@@ -231,16 +243,11 @@ export namespace Orchestrator {
       description: "Synthesize results",
       prompt: `Synthesize the following results from multiple agents into a coherent summary:\n\n${combined}`,
     }
-    const reduced = await spawnAgent(reducer, input.sessionID, input.model, input.abort)
+    const reduced = await spawnAgent(reducer, input.sessionID, input.model, input.abort, input.instance)
     return [...mapped, reduced]
   }
 
-  async function consensus(input: {
-    tasks: TaskSpec[]
-    sessionID: string
-    model: { providerID: string; modelID: string }
-    abort: AbortSignal
-  }): Promise<Result[]> {
+  async function consensus(input: StrategyInput): Promise<Result[]> {
     log.info("consensus", { count: input.tasks.length })
     // Run all tasks on the same prompt
     const results = await parallel(input)
@@ -258,7 +265,7 @@ export namespace Orchestrator {
       description: "Judge consensus",
       prompt: `Multiple agents solved the same problem. Compare their solutions and provide the best answer:\n\n${outputs}`,
     }
-    const judged = await spawnAgent(judge, input.sessionID, input.model, input.abort)
+    const judged = await spawnAgent(judge, input.sessionID, input.model, input.abort, input.instance)
     return [...results, judged]
   }
 }

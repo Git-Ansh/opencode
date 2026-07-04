@@ -423,8 +423,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       const model = yield* providerSvc
         .getModel(ctx.payload.providerID, ctx.payload.modelID)
         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      // DCP.adapt is a plain-Promise module that bridges back into the Effect
+      // world via the global AppRuntime, whose fibers lack the per-request
+      // InstanceRef — resolve the instance context here (inside the instance
+      // context) and thread it in so DCP can re-provide it.
+      const instance = yield* InstanceState.context
       return yield* Effect.tryPromise({
-        try: () => DCP.adapt({ sessionID: ctx.params.sessionID, model }),
+        try: () => DCP.adapt({ sessionID: ctx.params.sessionID, model, instance }),
         catch: () => new HttpApiError.BadRequest({}),
       })
     })

@@ -21,6 +21,7 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
+import { Git } from "@/git"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { AdaptivePrompt } from "./prompt/adaptive"
 import { ContextInjection } from "./context-injection"
@@ -58,6 +59,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
+    const git = yield* Git.Service
     const locations = yield* LocationServiceMap.Service
 
     return Service.of({
@@ -131,12 +133,27 @@ const layer = Layer.effect(
         ].join("\n")
       }),
 
+      // Note(port): AdaptivePrompt / ContextInjection are plain-Promise modules
+      // that must not reach back into the Effect world themselves (a bare
+      // AppRuntime call runs on the global runtime, which lacks the per-request
+      // InstanceRef). Resolve the instance context — and run git — here, inside
+      // the instance context, and pass plain values in.
       adaptive: Effect.fn("SystemPrompt.adaptive")(function* (recentMessages: string[]) {
-        return yield* Effect.promise(() => AdaptivePrompt.compose(recentMessages))
+        const ctx = yield* InstanceState.context
+        return yield* Effect.promise(() => AdaptivePrompt.compose(ctx.worktree, recentMessages))
       }),
 
       contextInjection: Effect.fn("SystemPrompt.contextInjection")(function* () {
-        return yield* Effect.promise(() => ContextInjection.gather())
+        const ctx = yield* InstanceState.context
+        // Non-git projects have worktree="/", avoid running git commands with cwd: "/"
+        if (ctx.project.vcs !== "git") return []
+        const run = (args: string[]) =>
+          git.run(args, { cwd: ctx.directory }).pipe(
+            Effect.map((result) => (result.exitCode === 0 ? result.text().trim() || undefined : undefined)),
+            Effect.catchCause(() => Effect.succeed(undefined)),
+          )
+        const [gitDiff, gitStatus] = yield* Effect.all([run(["diff", "--stat", "HEAD"]), run(["status", "--short"])])
+        return yield* Effect.promise(() => ContextInjection.gather({ directory: ctx.directory, gitDiff, gitStatus }))
       }),
 
       workspace: Effect.fn("SystemPrompt.workspace")(function* (sessionID: string) {
@@ -156,7 +173,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: [Skill.node, MCP.node, Git.node, locationServiceMapNode],
 })
 
 export * as SystemPrompt from "./system"
